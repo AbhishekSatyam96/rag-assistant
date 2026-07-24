@@ -209,7 +209,7 @@ importers:
     dependencies:
       '@langchain/textsplitters':
         specifier: ^1.0.1
-        version: 1.0.1(@langchain/core@1.2.3)
+        version: 1.0.1(@langchain/core@1.2.3(openai@6.48.0(zod@4.4.3)))
       '@node-rs/argon2':
         specifier: ^2.0.2
         version: 2.0.2
@@ -231,6 +231,9 @@ importers:
       jose:
         specifier: ^6.2.4
         version: 6.2.4
+      openai:
+        specifier: ^6.48.0
+        version: 6.48.0(zod@4.4.3)
       pg:
         specifier: ^8.22.0
         version: 8.22.0
@@ -1355,6 +1358,26 @@ packages:
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
 
+  openai@6.48.0:
+    resolution: {integrity: sha512-KhVp+FyV50QrXNextvL9hIU5l6ox5HYuKQjGVk7lIqprgJol90+dQXWONV6S1lRWsKA1bXjrow8RsUT14M1hNA==}
+    peerDependencies:
+      '@aws-sdk/credential-provider-node': '>=3.972.0 <4'
+      '@smithy/hash-node': '>=4.3.0 <5'
+      '@smithy/signature-v4': '>=5.4.0 <6'
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      '@aws-sdk/credential-provider-node':
+        optional: true
+      '@smithy/hash-node':
+        optional: true
+      '@smithy/signature-v4':
+        optional: true
+      ws:
+        optional: true
+      zod:
+        optional: true
+
   p-finally@1.0.0:
     resolution: {integrity: sha512-LICb2p9CB7FS+0eR1oqWnHhp0FljGLZCWBE9aix0Uye9W8LTQPwMTYVGWQWIw9RdQiDg4+epXQODwIYJtSJaow==}
     engines: {node: '>=4'}
@@ -1754,12 +1777,12 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
-  '@langchain/core@1.2.3':
+  '@langchain/core@1.2.3(openai@6.48.0(zod@4.4.3))':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       '@standard-schema/spec': 1.1.0
       js-tiktoken: 1.0.21
-      langsmith: 0.8.5
+      langsmith: 0.8.5(openai@6.48.0(zod@4.4.3))
       mustache: 4.2.0
       p-queue: 6.6.2
       zod: 4.4.3
@@ -1770,9 +1793,9 @@ snapshots:
       - openai
       - ws
 
-  '@langchain/textsplitters@1.0.1(@langchain/core@1.2.3)':
+  '@langchain/textsplitters@1.0.1(@langchain/core@1.2.3(openai@6.48.0(zod@4.4.3)))':
     dependencies:
-      '@langchain/core': 1.2.3
+      '@langchain/core': 1.2.3(openai@6.48.0(zod@4.4.3))
       js-tiktoken: 1.0.21
 
   '@napi-rs/wasm-runtime@0.2.12':
@@ -2610,9 +2633,11 @@ snapshots:
 
   json-schema-traverse@1.0.0: {}
 
-  langsmith@0.8.5:
+  langsmith@0.8.5(openai@6.48.0(zod@4.4.3)):
     dependencies:
       p-queue: 6.6.2
+    optionalDependencies:
+      openai: 6.48.0(zod@4.4.3)
 
   lodash@4.18.1: {}
 
@@ -2667,6 +2692,10 @@ snapshots:
   once@1.4.0:
     dependencies:
       wrappy: 1.0.2
+
+  openai@6.48.0(zod@4.4.3):
+    optionalDependencies:
+      zod: 4.4.3
 
   p-finally@1.0.0: {}
 
