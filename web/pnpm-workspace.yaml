@@ -1,0 +1,9 @@
+# Not a linked monorepo — web/ is a standalone pnpm project (same as api/).
+# This file exists only to allow specific packages' build scripts to run.
+# pnpm blocks postinstall scripts by default (supply-chain safety); these two
+# are trusted and need their native builds:
+#   sharp         -> Next.js image optimization
+#   unrs-resolver -> native module resolver used by eslint-config-next
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
