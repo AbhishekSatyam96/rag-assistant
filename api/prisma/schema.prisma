@@ -18,3 +18,37 @@ model User {
   password  String
   createdAt DateTime @default(now())
 }
+
+
+model Document {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  filename  String
+  mimeType  String
+  status    DocStatus @default(PENDING)   // ingestion is async — track it
+  createdAt DateTime  @default(now())
+  chunks    Chunk[]
+}
+
+model Chunk {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content    String
+  chunkIndex Int                          // ordinal within the doc — always cite-able
+  page       Int?                         // from the parser when available (PDF)
+  charStart  Int?                         // fallback locator for plain text
+  charEnd    Int?
+  embedding  Unsupported("vector(1536)")? // pgvector column; Prisma treats it as opaque
+  createdAt  DateTime @default(now())
+
+  @@index([documentId])
+}
+
+enum DocStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
