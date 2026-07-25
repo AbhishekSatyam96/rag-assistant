@@ -1,5 +1,5 @@
 -- Enable pgvector. Must run BEFORE the Chunk table, which uses the `vector` type.
--- (Prisma doesn't manage this itself because `embedding` is an Unsupported() column.)
+-- Prisma doesn't manage extensions by default, and this doesn't cause drift.
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- CreateEnum
@@ -41,7 +41,7 @@ ALTER TABLE "Document" ADD CONSTRAINT "Document_userId_fkey" FOREIGN KEY ("userI
 -- AddForeignKey
 ALTER TABLE "Chunk" ADD CONSTRAINT "Chunk_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- Vector similarity index for retrieval. HNSW with cosine distance is the
--- standard choice for OpenAI embeddings. Prisma won't generate this (Unsupported
--- column), so it's hand-added here. It's created on an empty table, so it's cheap.
-CREATE INDEX "Chunk_embedding_hnsw_idx" ON "Chunk" USING hnsw ("embedding" vector_cosine_ops);
+-- NOTE: The HNSW vector-similarity index is intentionally NOT created here.
+-- Prisma Migrate can't model an index on an Unsupported() column, so keeping it
+-- in a `migrate dev` migration causes perpetual drift. It will be added at the
+-- retrieval milestone via `migrate deploy` (which skips drift detection).

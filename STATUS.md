@@ -31,7 +31,7 @@
 
 ## 🔨 In progress — M4: Ingestion pipeline (backend) ← this session
 
-**Code-complete and typechecks, but NOT yet applied or run** (no migration applied, no real DB/OpenAI call made).
+**DB layer is live and migrated. Service is code-complete + typechecks, but not yet run** (no real DB/OpenAI call made — no routes, no data).
 
 - **`api/src/lib/chunk.ts`** — `chunkText(text, opts)` using `RecursiveCharacterTextSplitter` (defaults: `chunkSize 1000`, `chunkOverlap 200`); trims + drops empty chunks; returns `{ content, chunkIndex }[]`.
 - **`api/src/lib/embed.ts`** — `embed(texts)` → `number[][]` via OpenAI, batched (100/req), output kept aligned to input order.
@@ -39,11 +39,13 @@
 - **`api/src/lib/env.ts`** — now requires `OPENAI_API_KEY` (fails fast at boot).
 - **`api/src/modules/documents/document.service.ts`** — `ingestDocument()`: creates a `Document`, drives the `PENDING → PROCESSING → READY/FAILED` state machine, chunks + embeds **outside** any transaction, then persists chunks + embeddings + status flip in **one** transaction.
 - **Schema:** `Document` + `Chunk` models (+ `DocStatus` enum) now have a migration; fixed a missing `User.documents` back-relation.
-- **Migration authored, ⚠️ not applied:** `prisma/migrations/20260724094910_add_documents_and_chunks/` — enables pgvector, creates tables, and adds an **HNSW cosine index** on `Chunk.embedding`.
+- **Migration APPLIED & clean:** `prisma/migrations/20260724105907_add_documents_and_chunks/` — enables pgvector, creates `Document`/`Chunk`/`DocStatus` + FKs + `documentId` index. `migrate status` = "up to date", no drift. Verified live: `vector` 0.8.1 enabled, tables present.
+- **⚠️ HNSW index deferred on purpose** — see the pgvector/Prisma-Migrate note in Key decisions. To be added at the retrieval milestone via `migrate deploy`.
+- **DB was reset once** to clean up a corrupted migration history (my HNSW-in-migration mistake). All prior test users were wiped — **re-signup needed** to get an account.
 
-**➡️ Immediate next action:** run `cd api && pnpm exec prisma migrate dev` to apply it. Requires the Postgres provider to allow `CREATE EXTENSION vector` (Neon does).
+**➡️ Immediate next action:** build the routes/schema to expose `ingestDocument` over HTTP (matches the `auth` module's routes → service → lib layering), OR a smoke test that ingests one short doc end-to-end (first real OpenAI + DB call).
 
-**Still needed to call M4 done:** apply migration · a parser/upload path to turn real files into text · HTTP routes to expose `ingestDocument` · a runtime smoke test.
+**Still needed to call M4 done:** parser/upload path (file → text) · HTTP routes · runtime smoke test · (later) HNSW index.
 
 ## 🧠 Key decisions (and why)
 - **Real Express backend, not Next API routes** → to demonstrate backend skill for senior roles.
@@ -53,11 +55,12 @@
 - **argon2id via `@node-rs/argon2`** → prebuilt binaries, avoids node-gyp build pain.
 - **Chunk + embed run *outside* the DB transaction** → embedding is a network call to OpenAI; never hold a Postgres transaction open across a slow external call.
 - **pgvector written via raw SQL two-step** → Prisma can't set the `Unsupported("vector(1536)")` column through `createMany`, so we insert text columns first, then `UPDATE ... = ${literal}::vector` matched by `(documentId, chunkIndex)`.
-- **HNSW + cosine index, hand-added to the migration** → Prisma won't generate indexes on an `Unsupported` column; cosine is the standard match for OpenAI embeddings.
-- **Extension line prepended to the migration by hand** → Prisma won't emit `CREATE EXTENSION vector`, and it must run before the `Chunk` table that uses the type.
+- **HNSW index kept OUT of Prisma-managed migrations** → hard-won lesson: Prisma Migrate can't model an index on an `Unsupported()` column, so `migrate dev` sees it as drift and auto-generates a `DROP INDEX` every time (this corrupted the history once and forced a reset). Plan: add the HNSW/cosine index at the retrieval milestone via a raw migration applied with `migrate deploy` (which skips drift detection). pgvector's `<=>` search works without it at demo scale.
+- **`CREATE EXTENSION vector` lives in the migration by hand** → Prisma won't emit it, it must run before the `Chunk` table, and (unlike indexes) it does NOT cause drift, so it's safe there.
 
 ## 📦 Current state
-- **Working tree is NOT clean** — M4 code + migration are uncommitted; last commit is still the auth work.
+- **Working tree is NOT clean** — M4 code + the clean migration are uncommitted; last commit is still the auth work. (Note: two dead migration folders — `20260724094910` + `20260724103914_first` — were deleted this session and show as `D` in git; the new clean migration is `20260724105907`.)
+- **DB freshly reset** — 0 users / 0 documents / 0 chunks. Create an account at `/signup` before testing anything auth-gated.
 - New dependency: `openai` (`^6`). New required env var: **`OPENAI_API_KEY`** (already added to `api/.env`).
 - **No secrets in git** — `.env` files are gitignored (verified).
 - **No git remote configured** yet.
