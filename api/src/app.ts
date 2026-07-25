@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { prisma } from "./lib/prisma";
 import { authRouter } from "./modules/auth/auth.routes";
+import { documentRouter } from "./modules/documents/document.routes";
 import { requireAuth } from "./middleware/auth";
 import { errorHandler } from "./middleware/error";
 
@@ -40,6 +41,13 @@ export function createApp() {
   app.get("/me", requireAuth, (req, res) => {
     res.json({ user: req.user });
   });
+
+  // requireAuth is applied at the MOUNT POINT, not inside document.routes.ts, so
+  // it covers every current and future route in that router. Forgetting the
+  // middleware on a newly added route is a classic way to ship an unauthenticated
+  // endpoint; this makes that impossible.
+  //   POST /documents, GET /documents, GET /documents/:id
+  app.use("/documents", requireAuth, documentRouter);
 
   // Error middleware must be registered LAST, after all routes.
   app.use(errorHandler);

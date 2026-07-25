@@ -205,3 +205,84 @@ export async function ingestDocument({
       : new HttpError(500, "Failed to ingest document", { cause: err });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Read path
+// ---------------------------------------------------------------------------
+
+// The shape a document takes when it leaves the API. An explicit allow-list,
+// not `select`-less "give me everything", because two columns must never go out
+// over the wire:
+//   - `content`, the full raw text. Returning it from the LIST endpoint would
+//     mean a user with 50 documents downloads their entire corpus to render a
+//     sidebar. It stays server-side, where it exists to be re-chunked.
+//   - `embedding`, which is 1536 floats of no use to a client (Prisma wouldn't
+//     return the Unsupported() column anyway, but the intent is the point).
+//
+// `error` IS included, so a FAILED document can explain itself in the list
+// without the UI making a follow-up request per failed row.
+const documentSelect = {
+  id: true,
+  title: true,
+  status: true,
+  chunkCount: true,
+  error: true,
+  createdAt: true,
+} satisfies Prisma.DocumentSelect;
+
+export type DocumentSummary = Prisma.DocumentGetPayload<{
+  select: typeof documentSelect;
+}>;
+
+// Newest first — this is exactly the access pattern the composite index
+// `@@index([userId, createdAt(sort: Desc)])` in schema.prisma exists to serve:
+// Postgres can seek straight to this user's slice and walk it already ordered,
+// with no sort step.
+//
+// Takes an object rather than a bare string so pagination (`cursor`, `take`)
+// can be added later without changing every call site.
+export async function listDocuments({
+  userId,
+}: {
+  userId: string;
+}): Promise<DocumentSummary[]> {
+  return prisma.document.findMany({
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+    select: documentSelect,
+  });
+}
+
+export async function getDocument({
+  userId,
+  id,
+}: {
+  userId: string;
+  id: string;
+}): Promise<DocumentSummary> {
+  // `userId` goes in the WHERE clause — it is NOT a check performed after the
+  // fact. The tempting alternative,
+  //
+  //     const doc = await prisma.document.findUnique({ where: { id } });
+  //     if (doc.userId !== userId) throw new HttpError(403, ...);
+  //
+  // is one forgotten `if` away from an IDOR: any logged-in user could read any
+  // document by guessing its id. Scoping the query makes the ownership rule
+  // structural, so it cannot be omitted by a future edit.
+  //
+  // (findFirst rather than findUnique because `{ id, userId }` isn't a declared
+  // unique key. It still resolves via the primary-key index on `id`.)
+  const document = await prisma.document.findFirst({
+    where: { id, userId },
+    select: documentSelect,
+  });
+
+  // 404 rather than 403 for a document that exists but belongs to someone else.
+  // A 403 would confirm the id is real, letting an attacker enumerate ids to
+  // map another user's library — the response itself becomes the oracle. This
+  // deliberately collapses "no such document" and "not yours" into one
+  // indistinguishable answer, which is also just what the query above returns.
+  if (!document) throw new HttpError(404, "Document not found");
+
+  return document;
+}
