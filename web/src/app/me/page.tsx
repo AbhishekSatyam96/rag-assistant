@@ -1,21 +1,16 @@
 "use client";
 
-import { useEffect } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useAuth } from "@/lib/auth-context";
+import { useRequireAuth } from "@/lib/use-require-auth";
 
 // The protected page — the frontend mirror of the api's /me smoke test. Its
 // content comes straight from the token the api validated.
 export default function MePage() {
   const router = useRouter();
-  const { user, status, logout } = useAuth();
-
-  // Client-side guard: any non-authenticated state bounces to /login. Because a
-  // 401 on load (e.g. an expired token) resolves to "unauthenticated" in the
-  // context, token expiry is covered by this same redirect.
-  useEffect(() => {
-    if (status === "unauthenticated") router.replace("/login");
-  }, [status, router]);
+  // The redirect-if-unauthenticated guard used to live here as a local effect;
+  // it moved into useRequireAuth so /documents shares it verbatim.
+  const { user, status, logout } = useRequireAuth();
 
   if (status !== "authenticated" || !user) {
     return (
@@ -36,15 +31,23 @@ export default function MePage() {
           <dd className="font-mono break-all">{user.id}</dd>
         </dl>
 
-        <button
-          onClick={() => {
-            logout();
-            router.push("/login");
-          }}
-          className="rounded-md border border-black/15 px-4 py-2 text-sm font-medium hover:bg-black/5 dark:border-white/15 dark:hover:bg-white/5"
-        >
-          Log out
-        </button>
+        <div className="flex gap-3">
+          <Link
+            href="/documents"
+            className="rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
+          >
+            Documents
+          </Link>
+          <button
+            onClick={() => {
+              logout();
+              router.push("/login");
+            }}
+            className="rounded-md border border-black/15 px-4 py-2 text-sm font-medium hover:bg-black/5 dark:border-white/15 dark:hover:bg-white/5"
+          >
+            Log out
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -44,6 +44,29 @@ export class ApiError extends Error {
   }
 }
 
+// Mirrors the api's DocStatus enum. Ingestion is a state machine, not a
+// boolean: PENDING -> PROCESSING -> READY | FAILED.
+export type DocStatus = "PENDING" | "PROCESSING" | "READY" | "FAILED";
+
+// The api's `documentSelect` shape. Note what is absent: `content`, the full
+// raw text. The server never sends it, so a user with 50 documents doesn't
+// download their whole corpus to render this list.
+//
+// `createdAt` is a STRING here, not a Date — it went through JSON, which has no
+// date type. Parse it at the point of display, never assume it's a Date.
+export type DocumentSummary = {
+  id: string;
+  title: string;
+  status: DocStatus;
+  chunkCount: number;
+  error: string | null;
+  createdAt: string;
+};
+
+export function isProcessing(doc: DocumentSummary): boolean {
+  return doc.status === "PENDING" || doc.status === "PROCESSING";
+}
+
 type RequestOptions = {
   method?: "GET" | "POST";
   body?: unknown;
@@ -93,4 +116,42 @@ export function login(email: string, password: string): Promise<AuthResponse> {
 
 export function getMe(token: string): Promise<{ user: AuthUser }> {
   return request<{ user: AuthUser }>("/me", { token });
+}
+
+// --- documents ---------------------------------------------------------------
+
+// Ingestion is currently synchronous: this promise resolves once the api has
+// chunked and embedded the text, which takes a few seconds for a real document.
+// `document.status` will normally already be READY.
+//
+// Callers must NOT rely on that. The api is designed to switch to 202 Accepted
+// + PENDING later, and the contract deliberately reads as "here is the document
+// and its status right now" — so treat the result as a starting point and poll
+// until the status is terminal. That way the change costs the frontend nothing.
+//
+// `deduped` is true when this exact text was already ingested: no new document
+// was created and the existing one came back untouched (the api answers 200
+// instead of 201).
+export function createDocument(
+  token: string,
+  input: { title: string; content: string },
+): Promise<{ document: DocumentSummary; deduped: boolean }> {
+  return request<{ document: DocumentSummary; deduped: boolean }>("/documents", {
+    method: "POST",
+    body: input,
+    token,
+  });
+}
+
+export function listDocuments(token: string): Promise<{ documents: DocumentSummary[] }> {
+  return request<{ documents: DocumentSummary[] }>("/documents", { token });
+}
+
+// Returns the identical shape to createDocument's `document`, which is what
+// makes a polling loop trivial — no special-casing the response that started it.
+export function getDocument(
+  token: string,
+  id: string,
+): Promise<{ document: DocumentSummary }> {
+  return request<{ document: DocumentSummary }>(`/documents/${id}`, { token });
 }
