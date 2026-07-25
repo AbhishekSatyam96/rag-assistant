@@ -155,3 +155,129 @@ export function getDocument(
 ): Promise<{ document: DocumentSummary }> {
   return request<{ document: DocumentSummary }>(`/documents/${id}`, { token });
 }
+
+// --- queries (streaming) -----------------------------------------------------
+
+// A citation. `n` is the marker the model wrote into its prose: the text
+// "...as covered in the handbook [2]" refers to the source whose `n` is 2. The
+// server sends `n` explicitly rather than letting us infer it from array
+// position, so the mapping can't drift if this list is ever filtered or sorted.
+export type Source = {
+  n: number;
+  documentId: string;
+  documentTitle: string;
+  chunkIndex: number;
+  content: string;
+  similarity: number;
+};
+
+// Mirrors the api's QueryEvent union exactly. Kept as a discriminated union so
+// a `switch (event.type)` narrows the payload and the compiler flags an
+// unhandled case if the server ever adds one.
+export type QueryEvent =
+  | { type: "sources"; sources: Source[] }
+  | { type: "token"; value: string }
+  | { type: "done"; answer: string }
+  | { type: "error"; message: string };
+
+// Why this doesn't use `request()` above: that helper does `await res.json()`,
+// which waits for the ENTIRE body before resolving — the exact opposite of what
+// a stream is for. Streaming needs the raw `res.body` reader, so it gets its own
+// function rather than a flag on the shared one.
+//
+// Why fetch + ReadableStream and not EventSource/SSE: EventSource cannot set
+// request headers, and our auth is a Bearer token. SSE would mean putting the
+// token in the query string, where it ends up in server access logs and browser
+// history. This is a hard constraint of the auth design, not a style choice.
+//
+// An async generator, so consumers write `for await (const event of streamAsk())`
+// — ordinary control flow, where `break` cancels and `try/catch` catches.
+export async function* streamAsk(
+  token: string,
+  input: { question: string; k?: number },
+  signal?: AbortSignal,
+): AsyncGenerator<QueryEvent> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}/queries`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(input),
+      signal,
+    });
+  } catch (err) {
+    // An abort surfaces here as an exception too. Rethrow it untouched so the
+    // caller can tell "I cancelled this" apart from "the server is unreachable"
+    // — otherwise clicking Stop renders a scary connection error.
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError(0, "Can't reach the server. Is the API running on port 4000?");
+  }
+
+  // A failure BEFORE the stream started is an ordinary JSON error response with
+  // a real status code — the server defers its headers precisely so this stays
+  // possible. Handle it exactly like every other request, so a 401 here behaves
+  // the same as a 401 anywhere else.
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new ApiError(
+      res.status,
+      (data && typeof data.error === "string" && data.error) ||
+        `Request failed (${res.status})`,
+      data?.details,
+    );
+  }
+
+  if (!res.body) throw new ApiError(0, "Streaming is not supported in this browser.");
+
+  const reader = res.body.getReader();
+  // `stream: true` is load-bearing. A UTF-8 character can be up to 4 bytes, and
+  // a network chunk can split one down the middle. Without it, TextDecoder
+  // treats each chunk as a complete document and emits U+FFFD (�) for the
+  // dangling bytes; with it, the decoder holds the partial character back until
+  // the rest arrives. Bugs from this only appear on non-ASCII output, which is
+  // why they reliably survive to production.
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // The OTHER half of the same problem, at the line level: a network chunk
+      // has nothing to do with a line boundary. One read can deliver two and a
+      // half events, and the next delivers the missing half. So we accumulate
+      // into `buffer` and only consume up to the last complete newline — the
+      // remainder stays buffered for the next read. `JSON.parse(chunk)` without
+      // this works perfectly on short answers and fails on long ones, which is
+      // the worst possible failure schedule.
+      let newline: number;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) yield JSON.parse(line) as QueryEvent;
+      }
+    }
+
+    // The server always terminates its final event with a newline, so anything
+    // left here means the stream was cut mid-event. Parse it only if it happens
+    // to be valid JSON; a truncated fragment is dropped rather than thrown,
+    // because the tokens already delivered are still worth showing.
+    const rest = buffer.trim();
+    if (rest) {
+      try {
+        yield JSON.parse(rest) as QueryEvent;
+      } catch {
+        /* truncated trailing fragment — ignore */
+      }
+    }
+  } finally {
+    // Runs on early `break`, on an exception, and on abort. Without it, a
+    // consumer that stops reading leaves the connection open and the browser
+    // holding a lock on the stream. `finally` in a generator fires when the
+    // generator is disposed, which is exactly the guarantee needed here.
+    reader.cancel().catch(() => {});
+  }
+}

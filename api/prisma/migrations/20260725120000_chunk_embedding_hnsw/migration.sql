@@ -1,0 +1,38 @@
+-- The vector-similarity index, deliberately deferred from the migration that
+-- created "Chunk" (see the note at the bottom of 20260724105907) until it was
+-- actually needed by the retrieval milestone.
+--
+-- WHY THIS MIGRATION IS HAND-WRITTEN AND MUST BE APPLIED WITH `migrate deploy`:
+-- Prisma models `embedding` as `Unsupported("vector(1536)")`, meaning it knows
+-- the column exists but understands nothing about it. It therefore cannot
+-- represent an index on that column in schema.prisma. `prisma migrate dev`
+-- compares the DB against the schema, sees an index it can't account for, calls
+-- it drift, and helpfully generates a `DROP INDEX` to "fix" it. `migrate deploy`
+-- performs no drift detection — it only applies pending migrations — which is
+-- why it is the correct command here, and why `migrate dev` must not be run
+-- against a database that has this index.
+--
+-- OPERATOR CLASS IS LOAD-BEARING: `vector_cosine_ops` pairs with the `<=>`
+-- (cosine distance) operator. Query with `<->` (L2) or `<#>` (inner product)
+-- against this index and Postgres does not error — it silently ignores the
+-- index and sequential-scans every row. The failure mode is a slow correct
+-- answer, which is exactly the kind of bug that survives to production. Cosine
+-- is the right choice here because OpenAI returns L2-normalised embeddings.
+--
+-- HNSW (a navigable small-world graph) rather than IVFFlat, because IVFFlat
+-- must be built on data that already exists to learn its cluster centroids —
+-- building it on an empty or tiny table produces a permanently bad index. HNSW
+-- builds incrementally and stays correct as rows arrive, which is the only
+-- sane option for a table that grows one upload at a time.
+--
+--   m = 16               edges per node. Higher = better recall, bigger index.
+--   ef_construction = 64 candidate list size while building. Higher = better
+--                        graph, slower build. 16/64 are pgvector's defaults and
+--                        the right starting point until an eval says otherwise.
+--
+-- NOTE: this index is APPROXIMATE. It can miss a true nearest neighbour, traded
+-- for sub-linear search. Recall is tuned per-session with `hnsw.ef_search`
+-- (default 40); see lib/retrieve.ts.
+CREATE INDEX IF NOT EXISTS "Chunk_embedding_hnsw_idx"
+  ON "Chunk" USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);

@@ -111,6 +111,9 @@ export default function DocumentsPage() {
         <div className="flex shrink-0 flex-col items-end gap-1 text-xs">
           <span className="text-black/50 dark:text-white/50">{user.email}</span>
           <div className="flex gap-3">
+            <Link href="/ask" className="underline underline-offset-4">
+              Ask
+            </Link>
             <Link href="/me" className="underline underline-offset-4">
               Account
             </Link>

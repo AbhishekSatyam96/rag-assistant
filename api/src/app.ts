@@ -3,6 +3,7 @@ import cors from "cors";
 import { prisma } from "./lib/prisma";
 import { authRouter } from "./modules/auth/auth.routes";
 import { documentRouter } from "./modules/documents/document.routes";
+import { queryRouter } from "./modules/queries/query.routes";
 import { requireAuth } from "./middleware/auth";
 import { errorHandler } from "./middleware/error";
 
@@ -48,6 +49,16 @@ export function createApp() {
   // endpoint; this makes that impossible.
   //   POST /documents, GET /documents, GET /documents/:id
   app.use("/documents", requireAuth, documentRouter);
+
+  // POST /queries — ask a question, get a streamed grounded answer + citations.
+  //
+  // A POST to a plural resource, not `GET /answer?q=...`, for three reasons:
+  // the request has a body (question + k) rather than a lone param; questions
+  // are not URL-length-safe; and answers must never be cached by an
+  // intermediary keyed on the URL, since the same question yields different
+  // answers per user. The response streams, but the request is still a normal
+  // JSON POST — see the NDJSON note in query.routes.ts.
+  app.use("/queries", requireAuth, queryRouter);
 
   // Error middleware must be registered LAST, after all routes.
   app.use(errorHandler);
