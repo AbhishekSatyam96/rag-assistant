@@ -131,7 +131,10 @@ CHAT_MODEL="gpt-4o-mini"
 PORT=4000
 NODE_ENV=development
 WEB_ORIGIN="http://localhost:3000"
+SIGNUP_INVITE_CODE="…"                          # unset = signup open to anyone
 ```
+
+`SIGNUP_INVITE_CODE` is the emergency brake: set it and `POST /auth/signup` requires a matching `inviteCode`, closing the door without a code change. Set `NEXT_PUBLIC_SIGNUP_INVITE_REQUIRED=true` on the web app at the same time so the signup form shows the field.
 
 Env is validated by zod at boot, so a missing or malformed var fails immediately with a named error rather than deep inside a request.
 
@@ -147,6 +150,7 @@ pnpm dev                          # http://localhost:4000
 cd web
 pnpm install
 echo 'NEXT_PUBLIC_API_URL="http://localhost:4000"' > .env.local
+# add NEXT_PUBLIC_SIGNUP_INVITE_REQUIRED=true only when the api has SIGNUP_INVITE_CODE set
 pnpm dev                          # http://localhost:3000
 ```
 
@@ -220,7 +224,9 @@ Backend layering is **routes → service → lib**: routes validate input and pi
 
 **Next — evaluation harness:** a golden question set, retrieval hit-rate@k / MRR, groundedness and refusal accuracy. It exists to settle the numbers currently chosen by judgement (`k = 5`, `chunkSize 1000`, `chunkOverlap 200`). `temperature: 0` and the fixed refusal string are what make those metrics measurable.
 
-**Deliberately deferred:** file upload / PDF parsing (pasting text already proves the pipeline), refresh-token rotation and rate limiting, query persistence, reranking / hybrid search / query rewriting (deferred until evals can prove they help), LangGraph, and deployment to Cloud Run + Vercel.
+**Abuse & cost controls:** the app spends real money on behalf of anyone who signs up, so `/queries` carries a burst limit (10/min), a per-user daily budget (50/day), a global daily ceiling, and a cap of 2 concurrent streams — because a rate limit bounds requests per window, not simultaneous in-flight generations. `/auth/*` and document ingestion are limited too, and `SIGNUP_INVITE_CODE` closes signup entirely as a one-config-change lever. See [STATUS.md](STATUS.md) for the reasoning, including why `trust proxy` is a hop count rather than `true`.
+
+**Deliberately deferred:** file upload / PDF parsing (pasting text already proves the pipeline), refresh-token rotation, per-user *dollar* metering (rate limits bound requests, not spend), query persistence, reranking / hybrid search / query rewriting (deferred until evals can prove they help), LangGraph, and deployment to Cloud Run + Vercel.
 
 **Not there yet:** no automated test suite. Verification so far is runtime scripts and end-to-end probes; `createApp()` is already factored for supertest.
 

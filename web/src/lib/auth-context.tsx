@@ -25,7 +25,7 @@ type AuthContextValue = {
   token: string | null;
   status: AuthStatus;
   login: (email: string, password: string) => Promise<void>;
-  signup: (email: string, password: string) => Promise<void>;
+  signup: (email: string, password: string, inviteCode?: string) => Promise<void>;
   logout: () => void;
 };
 
@@ -90,8 +90,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signup = useCallback(
-    async (email: string, password: string) => {
-      const res = await apiSignup(email, password);
+    async (email: string, password: string, inviteCode?: string) => {
+      const res = await apiSignup(email, password, inviteCode);
       handleAuthSuccess(res.token, res.user);
     },
     [handleAuthSuccess],

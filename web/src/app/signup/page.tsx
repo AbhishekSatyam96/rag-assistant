@@ -17,8 +17,8 @@ export default function SignupPage() {
   return (
     <AuthForm
       mode="signup"
-      onSubmit={async (email, password) => {
-        await signup(email, password);
+      onSubmit={async (email, password, inviteCode) => {
+        await signup(email, password, inviteCode);
         router.push("/me");
       }}
     />

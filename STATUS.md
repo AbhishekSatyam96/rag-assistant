@@ -165,9 +165,50 @@ ORDER BY cosine_distance ASC;
 
 Note the table names are **double-quoted PascalCase** (`"Document"`, `"Chunk"`) — Prisma creates them that way, so unquoted `document` will not resolve.
 
+## 💸 Abuse & cost controls
+
+The app calls a paid API on behalf of anyone who signs up, and signup is open. These are the controls that bound what a stranger can spend. All of them live in `api/src/middleware/rate-limit.ts` and `api/src/middleware/concurrency.ts`.
+
+**Four layers, because no single one is sufficient:**
+
+| Layer | What it bounds | Where |
+| --- | --- | --- |
+| Spend cap on the OpenAI key | dollars, absolutely | OpenAI dashboard — **not code**, and the only layer that still works when the code below has a bug |
+| Rate limits (`express-rate-limit`) | requests per window | `middleware/rate-limit.ts` |
+| Concurrency guard | simultaneous in-flight streams | `middleware/concurrency.ts` |
+| Invite gate (`SIGNUP_INVITE_CODE`) | who can get an account at all | `auth.service.ts` — unset by default |
+
+**The limits:**
+
+| Route | Limit | Keyed on |
+| --- | --- | --- |
+| `POST /auth/signup` | 15 / hour | IP (subnet) |
+| `POST /auth/login` | 10 / 15 min, failures only | IP (subnet) |
+| `POST /documents` | 10 / hour | user id |
+| `POST /queries` | 10 / min **and** 50 / day | user id |
+| `POST /queries` | 2000 / day | global |
+| `POST /queries` | 2 concurrent | user id |
+
+**Decisions worth defending:**
+
+- **Two windows on `/queries`, not one.** Burst and budget are different problems: 10/min alone permits 14,400 requests a day; 50/day alone permits all 50 in one second. Mounted burst-first so a flood can't drain the daily budget it was trying to exhaust.
+- **Rate limits don't bound concurrency.** Ten requests arriving in the same millisecond all pass a 10/min limit, and streaming responses hold an expensive resource open for seconds. Hence a separate per-user in-flight cap of 2, released on the response's `close` event.
+- **Authenticated routes key on user id, not IP.** An IP is shared by everyone behind a NAT and changed at will on mobile data — simultaneously too coarse and too easy to escape. The account is what costs money, so the account gets the budget.
+- **`trust proxy` is a hop count (`1`), never `true`.** Without it, `req.ip` is the proxy's address in production and the entire internet shares one bucket. With `true`, a forged `X-Forwarded-For` mints a fresh bucket per request — a rate limiter that reports correctly and enforces nothing.
+- **IPv6 keys are masked to the subnet** via the library's `ipKeyGenerator`. A client typically holds a whole /64; keying on the exact address makes the limit free to bypass.
+- **Login limiting refunds successful attempts** (`skipSuccessfulRequests`), so it stops credential stuffing without punishing a user who signs in from two devices. Known tradeoff: once the limit trips, even a correct password is refused for the window — correct for brute-force defence, and a shared corporate NAT is the case where it hurts an innocent user.
+- **429s go through `next(new HttpError(429, …))`**, not the library's own response writer, so they arrive in the same `{ error }` shape as every other error and the existing web client renders them with no special-casing. `Retry-After` and draft-8 `RateLimit` headers are set by the library before the hand-off.
+- **The global daily cap trades availability for cost.** Enough traffic locks out everyone, including me — so it is sized from the actual unit cost (~$0.0004 an answer, i.e. well under $1/day at full draw) rather than from caution. Reaching it takes 40 distinct accounts at their full daily budget. The signup limit is sized the same way: 15/hour rather than 5, because mobile carriers put many subscribers behind one public IPv4 and this app is meant to be shared publicly, where turning away a real visitor is the more expensive failure.
+- **Memory store, not Redis.** Exact on one instance; behind an autoscaler the real limit becomes (limit × instances). Acceptable at instance count 1, and the fix is a one-line store swap because every limiter is built through one factory.
+- **Limits are skipped under `NODE_ENV=test`**, so a future supertest suite doesn't fail based on how many tests ran before it.
+
+**Verified end to end (2026-07-25):** concurrency guard admits exactly 2 of 5 parallel questions and correctly releases (5 subsequent sequential requests all pass); burst limiter admits exactly 10 then returns 429 with `Retry-After`; signup trips at 5/hour; login trips at the 10th failed attempt; invite gate returns 403 for a missing *and* a wrong code, 201 for the right one; an empty `SIGNUP_INVITE_CODE` is rejected at startup rather than silently disabling the gate.
+
+**Still open — the layer none of this provides:** rate limits count requests, not dollars. Metering actual spend needs `stream_options: { include_usage: true }` on the completion call and somewhere to store the token counts — i.e. the `Query` table below, which would then be paying for itself three times over (history, evals, budget enforcement).
+
 ## 🚧 Not built yet (deliberately deferred)
 - **File upload / parser path** (file → text). Deliberately skipped: pasting text already proves the pipeline, and `pdf-parse` demonstrates nothing about engineering judgement.
-- **Auth hardening:** refresh-token rotation, server-side logout/revocation, rate limiting on `/auth/*`, `helmet` headers.
+- **Auth hardening:** refresh-token rotation, server-side logout/revocation, `helmet` headers. (Rate limiting on `/auth/*` — DONE, see the abuse & cost controls section.)
 - **Eval harness** (M7, next — golden question set, retrieval hit-rate).
 - **Query persistence** — answers are assembled server-side (`done.answer`) then discarded. A `Query` table would unlock history, caching, and scoring stored answers.
 - **Markdown rendering of answers** — the model emits markdown; `/ask` renders it as preformatted text. Rendering it properly means sanitising it, since the text derives from user-supplied documents.

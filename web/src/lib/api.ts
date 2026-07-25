@@ -106,8 +106,20 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return data as T;
 }
 
-export function signup(email: string, password: string): Promise<AuthResponse> {
-  return request<AuthResponse>("/auth/signup", { method: "POST", body: { email, password } });
+// `inviteCode` is sent only when the deployment is running invite-only (the api
+// requires it when SIGNUP_INVITE_CODE is set, and ignores it otherwise), so it
+// is optional here rather than a separate function. A wrong or missing code
+// comes back as a 403 whose `error` string the form renders like any other
+// server message — no special-casing needed in the UI.
+export function signup(
+  email: string,
+  password: string,
+  inviteCode?: string,
+): Promise<AuthResponse> {
+  return request<AuthResponse>("/auth/signup", {
+    method: "POST",
+    body: { email, password, inviteCode },
+  });
 }
 
 export function login(email: string, password: string): Promise<AuthResponse> {

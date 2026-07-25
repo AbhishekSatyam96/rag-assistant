@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import { HttpError } from "../../lib/http-error";
+import { ingestLimiter } from "../../middleware/rate-limit";
 import { createDocumentSchema } from "./document.schema";
 import * as documentService from "./document.service";
 
@@ -22,7 +23,12 @@ function currentUserId(req: Request): string {
   return req.user.id;
 }
 
-documentRouter.post("/", async (req, res) => {
+// The limiter goes on POST alone, not at the mount point in app.ts, because
+// ingestion is the only route in this router that costs anything: it embeds up
+// to ~200 chunks. The two GETs are reads of rows this user already paid for,
+// and putting them in the same bucket would mean a dashboard that polls a
+// PROCESSING document could exhaust the budget for uploading one.
+documentRouter.post("/", ingestLimiter, async (req, res) => {
   // .parse() throws a ZodError on bad input → the error middleware turns it
   // into a 400 with per-field details.
   const input = createDocumentSchema.parse(req.body);

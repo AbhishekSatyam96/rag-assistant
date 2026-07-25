@@ -14,6 +14,15 @@ const envSchema = z.object({
   // configurable (it's a constant in lib/embed.ts): changing it invalidates
   // every vector already in the database, so it must never be an env-var flip.
   CHAT_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  // The signup gate. UNSET means signup is open to anyone, which is the
+  // deliberate default for a demo people are meant to be able to try. Set it
+  // and POST /auth/signup requires a matching `inviteCode` — the one-config-
+  // change lever for when open signup starts costing real money.
+  //
+  // `.optional()` with a `.min(1)` inside it, not a default of "": an empty
+  // string is exactly the value that would look configured while silently
+  // disabling the check, so it is rejected at startup instead.
+  SIGNUP_INVITE_CODE: z.string().min(1).optional(),
   PORT: z.coerce.number().default(4000),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
