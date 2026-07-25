@@ -31,7 +31,7 @@
 
 ## 🔨 In progress — M4: Ingestion pipeline (backend) ← this session
 
-**DB layer is live and migrated. Service is code-complete + typechecks, but not yet run** (no real DB/OpenAI call made — no routes, no data).
+**The ingestion pipeline is PROVEN end to end** — 12/12 smoke checks pass against real Neon with real OpenAI embeddings (2026-07-25). What's left for M4 is the HTTP surface, not the pipeline.
 
 - **`api/src/lib/chunk.ts`** — `chunkText(text, opts)` using `RecursiveCharacterTextSplitter` (defaults: `chunkSize 1000`, `chunkOverlap 200`); trims + drops empty chunks; returns `{ content, chunkIndex }[]`.
 - **`api/src/lib/embed.ts`** — `embed(texts)` → `number[][]` via OpenAI, batched (100/req), output kept aligned to input order.
@@ -43,9 +43,13 @@
 - **⚠️ HNSW index deferred on purpose** — see the pgvector/Prisma-Migrate note in Key decisions. To be added at the retrieval milestone via `migrate deploy`.
 - **DB was reset once** to clean up a corrupted migration history (my HNSW-in-migration mistake). All prior test users were wiped — **re-signup needed** to get an account.
 
-**➡️ Immediate next action:** build the routes/schema to expose `ingestDocument` over HTTP (matches the `auth` module's routes → service → lib layering), OR a smoke test that ingests one short doc end-to-end (first real OpenAI + DB call).
+- **`api/src/scripts/smoke-ingest.ts`** — runtime smoke test (`pnpm smoke:ingest`, add `--fake` for stub embeddings, `--keep` to leave rows behind). Ingests a ~2.5k-char doc as a dedicated `smoke@local.test` user, then asserts: status `READY` · >1 chunk (4 in practice) · DB row count matches · `chunkIndex` contiguous from 0 · every embedding is 1536-dim (`vector_dims`) · **every embedding distinct** (md5 fingerprint — catches a mis-targeted `UPDATE` writing one vector to every row) · stored text is a real excerpt of the source · empty-input branch returns `READY`/0 chunks without calling OpenAI · FK cascade wipes chunks with the user. Exits non-zero on failure, so it can go straight into CI later.
+- **Verified live 2026-07-25:** 12/12 pass in both modes. `--fake` ~1.2s; live with real `text-embedding-3-small` ~4.6s for a 4-chunk doc. The ~3.4s delta is pure OpenAI round-trip — the concrete argument for making ingestion async (`202 Accepted` + polling) rather than blocking the request.
+- **OpenAI billing resolved** — account topped up ($5) on 2026-07-25 after an earlier `429 insufficient_quota`. Embeddings now work; at ~$0.02/1M tokens that credit effectively doesn't deplete at this scale.
 
-**Still needed to call M4 done:** parser/upload path (file → text) · HTTP routes · runtime smoke test · (later) HNSW index.
+**➡️ Immediate next action:** the HTTP routes/schema exposing `ingestDocument` — `document.schema.ts` (zod body), `document.routes.ts` (`POST /documents`, `GET /documents`, `GET /documents/:id`), plus `listDocuments`/`getDocument` in the service, mounted behind `requireAuth`. Mirrors the `auth` module's routes → service → lib layering. Decisions to make while building: sync `201` vs async `202` (recommendation: sync first, convert deliberately later), the `express.json()` 100kb body limit, and 404-vs-403 for another user's document id.
+
+**Still needed to call M4 done:** ~~runtime smoke test~~ ✅ · ~~real embedding run~~ ✅ · HTTP routes · parser/upload path (file → text) · (later) HNSW index.
 
 ## 🧠 Key decisions (and why)
 - **Real Express backend, not Next API routes** → to demonstrate backend skill for senior roles.
@@ -56,11 +60,13 @@
 - **Chunk + embed run *outside* the DB transaction** → embedding is a network call to OpenAI; never hold a Postgres transaction open across a slow external call.
 - **pgvector written via raw SQL two-step** → Prisma can't set the `Unsupported("vector(1536)")` column through `createMany`, so we insert text columns first, then `UPDATE ... = ${literal}::vector` matched by `(documentId, chunkIndex)`.
 - **HNSW index kept OUT of Prisma-managed migrations** → hard-won lesson: Prisma Migrate can't model an index on an `Unsupported()` column, so `migrate dev` sees it as drift and auto-generates a `DROP INDEX` every time (this corrupted the history once and forced a reset). Plan: add the HNSW/cosine index at the retrieval milestone via a raw migration applied with `migrate deploy` (which skips drift detection). pgvector's `<=>` search works without it at demo scale.
+- **`HttpError` now carries a `cause`** → the ingest catch block used to wrap every failure as a bare `500 Failed to ingest document`, discarding the original. The first smoke run hit exactly that wall: a real, actionable OpenAI 429 was invisible. Wrapping errors must never destroy them.
+- **`ingestDocument` accepts an optional `embedFn`** → a dependency-injection seam. Production omits it and gets the real `embed`; the smoke test passes a deterministic stub, so the DB path can be verified without a paid API call (and later, in CI, without a network dependency at all).
 - **`CREATE EXTENSION vector` lives in the migration by hand** → Prisma won't emit it, it must run before the `Chunk` table, and (unlike indexes) it does NOT cause drift, so it's safe there.
 
 ## 📦 Current state
 - **Working tree is NOT clean** — M4 code + the clean migration are uncommitted; last commit is still the auth work. (Note: two dead migration folders — `20260724094910` + `20260724103914_first` — were deleted this session and show as `D` in git; the new clean migration is `20260724105907`.)
-- **DB freshly reset** — 0 users / 0 documents / 0 chunks. Create an account at `/signup` before testing anything auth-gated.
+- **DB state:** 1 real user (created via `/signup`), 0 documents, 0 chunks — the smoke test cleans up after itself.
 - New dependency: `openai` (`^6`). New required env var: **`OPENAI_API_KEY`** (already added to `api/.env`).
 - **No secrets in git** — `.env` files are gitignored (verified).
 - **No git remote configured** yet.

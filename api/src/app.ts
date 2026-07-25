@@ -22,8 +22,7 @@ export function createApp() {
     }),
   );
 
-  app.use(express.json()); // parse JSON request bodies into req.body
-
+  app.use(express.json());
   app.get("/health", async (_req, res) => {
     const users = await prisma.user.count();
     res.json({ status: "ok", users });
