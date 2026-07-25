@@ -16,6 +16,10 @@ Built as a proof-piece: a real Express backend (deliberately *not* Next.js API r
                                                          └──────────────────┘
 ```
 
+**Design docs:** [HLD](docs/hld.md) — topology, capacity, failure modes, scaling ladder ·
+[LLD](docs/lld.md) — data model, state machines, sequence diagrams, API contracts ·
+[STATUS.md](STATUS.md) — chronological decision log and milestone state.
+
 ---
 
 ## How it works
@@ -221,3 +225,5 @@ Backend layering is **routes → service → lib**: routes validate input and pi
 **Not there yet:** no automated test suite. Verification so far is runtime scripts and end-to-end probes; `createApp()` is already factored for supertest.
 
 See [STATUS.md](STATUS.md) for the full milestone log, every decision with its rationale, and verified SQL for inspecting documents, chunks, and embeddings.
+
+For the design documents proper: [HLD](docs/hld.md) covers topology, capacity, failure modes, and the scaling ladder; [LLD](docs/lld.md) covers the data model, state machines, sequence diagrams, API contracts, and concurrency semantics. Both mark **built** vs **degraded** vs **designed-not-built** explicitly — including the write path's known gaps.

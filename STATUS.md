@@ -112,10 +112,10 @@
 - **The frontend guard is UX, not security** → `useRequireAuth` hides UI; every `/documents` route independently verifies the token, which is what actually isolates tenants.
 
 ## 📦 Current state
-- **M6 is written and verified but NOT yet committed.** Last commit `8fd65ef`.
+- **M6 is committed** (`0ea3919` "UI and retrieve parts"). Last commit `54a111f` "add readme.md"; working tree clean.
 - **DB state:** 2 users · 2 documents ("Testing candid" 6 chunks, "Shri Ganesh Story" 2 chunks) · 8 chunks. Throwaway M6 test accounts were created and deleted again.
 - **No secrets in git** — `.env` files are gitignored (verified).
-- **No git remote configured** yet.
+- **Remote:** `origin` → `https://github.com/AbhishekSatyam96/rag-assistant.git`. `main` is pushed and in sync with `origin/main`.
 - Dev servers: API on `:4000` (`cd api && pnpm dev`), web on `:3000` (`cd web && pnpm dev`).
 - Auth uses real signup — no seeded account; create one at `/signup` (email + password ≥ 8 chars).
 - Required env: `DATABASE_URL`, `JWT_SECRET` (≥32 chars), `OPENAI_API_KEY`, optional `CHAT_MODEL` (default `gpt-4o-mini`), `PORT`, `NODE_ENV`, `WEB_ORIGIN`.
