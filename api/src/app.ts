@@ -22,7 +22,12 @@ export function createApp() {
     }),
   );
 
-  app.use(express.json({limit: "1mb"}));
+  // 1mb of JSON is ~250k characters of pasted text — comfortably more than the
+  // 200k `content` ceiling in document.schema.ts, so an oversized paste is
+  // rejected by zod with a field-level message and only a genuinely absurd body
+  // trips this limit (and gets a 413 from the error middleware).
+  app.use(express.json({ limit: "1mb" }));
+
   app.get("/health", async (_req, res) => {
     const users = await prisma.user.count();
     res.json({ status: "ok", users });
