@@ -64,6 +64,16 @@ function SourceCard({ source, focused }: { source: Source; focused: boolean }) {
             {source.n}
           </span>
           <span className="truncate text-xs font-medium">{source.documentTitle}</span>
+          {/* The point of PDF ingestion, in one line of UI. `page` is set only
+              when the document had pages, so a pasted-text source simply shows
+              nothing here — deliberately no "chunk 12" fallback, because that
+              names an internal detail the reader cannot go and verify, which is
+              the opposite of what a citation is for. */}
+          {source.page !== null && (
+            <span className="shrink-0 text-[11px] whitespace-nowrap text-black/45 tabular-nums dark:text-white/45">
+              p. {source.page}
+            </span>
+          )}
         </div>
 
         <span

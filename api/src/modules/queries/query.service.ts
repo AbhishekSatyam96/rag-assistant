@@ -19,6 +19,14 @@ export type Source = {
   documentId: string;
   documentTitle: string;
   chunkIndex: number;
+  // The page this chunk came from, for documents that have pages (PDFs). Null
+  // for pasted text, forever — so the client must render a fallback, not treat
+  // this as a value that shows up eventually.
+  //
+  // This is the payoff of the whole upload feature: "handbook, page 7" is a
+  // citation a reader can go and check, while "handbook, chunk 12" describes an
+  // implementation detail they have no way to look up.
+  page: number | null;
   // The chunk text itself, so the UI can show WHAT the answer was drawn from
   // without a follow-up request. Safe to send: retrieval already scoped these
   // rows to this user, so it is their own text coming back to them.
@@ -53,6 +61,7 @@ function toSource(chunk: RetrievedChunk, index: number): Source {
     documentId: chunk.documentId,
     documentTitle: chunk.documentTitle,
     chunkIndex: chunk.chunkIndex,
+    page: chunk.page,
     content: chunk.content,
     similarity: chunk.similarity,
   };

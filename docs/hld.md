@@ -23,7 +23,7 @@ Deliberately out of scope, with the reasoning:
 
 | Non-goal | Why |
 |---|---|
-| File upload / PDF parsing | Parsing is an upstream concern. Pasting text already exercises the full pipeline; a PDF parser adds surface area without proving anything new. |
+| OCR for scanned PDFs | A scanned page is a *picture* of text. Extracting it is a different and far more expensive capability than parsing. Image-only PDFs are detected and rejected with a specific `422` rather than silently ingested as empty. |
 | Multi-user document sharing | Every access-control decision in the system assumes single-owner documents. Sharing would reopen all of them at once. |
 | Conversational memory / follow-up questions | Each query is independent. Multi-turn requires query rewriting, which is deferred until evals can measure whether it helps. |
 | Real-time collaborative editing | Documents are immutable after ingestion. Editing means re-chunking and re-embedding — a different system. |
@@ -143,7 +143,7 @@ most common architectural mistake in this class of app.
 
 | | Write path — ingestion | Read path — query |
 |---|---|---|
-| **Trigger** | `POST /documents` | `POST /queries` |
+| **Trigger** | `POST /documents` (JSON) · `POST /documents/upload` (multipart PDF) | `POST /queries` |
 | **Slow because** | N embedding round-trips, unbounded in N | one LLM generating tokens |
 | **Cost scales with** | document length | context size + answer length |
 | **Is anyone waiting?** | No — the user can navigate away | **Yes, a human, right now** |
@@ -195,6 +195,20 @@ Neon Postgres
 re-chunking is a first-class operation. Settling `chunkSize` and `chunkOverlap` empirically (M7)
 means re-processing the entire corpus repeatedly, and that must not require the user to re-upload
 anything. This is also why a `reprocess` job type falls out of the queue work for free.
+
+**Why uploaded files are *not* stored.** A PDF is converted to text at the edge and the bytes are
+discarded — `memoryStorage`, never disk, never object storage. The system's source of truth is the
+extracted text, because that is the only thing it can chunk, embed or cite. Keeping the original
+would add a storage tier, a lifecycle policy and a deletion path, all to serve a file nobody ever
+requests. The cost of that choice, stated honestly: **re-processing cannot recover text the parser
+missed the first time** — a better parser would need the user to upload again. Acceptable while
+extraction is a solved problem for text-bearing PDFs; it would not be if OCR were in scope.
+
+**What page structure buys.** `Chunk.page` existed in the schema from the first migration and sat
+unused for as long as pasted text was the only input, because a string has no pages. A PDF is the
+only source that can populate it, which is what makes upload an architectural feature rather than a
+convenience one: a citation moves from *"chunk 12"* — an internal ordinal a reader cannot verify —
+to *"page 7"*, which they can go and check. Groundedness that cannot be checked is just a claim.
 
 **Why no separate vector DB** (Pinecone / Qdrant / Weaviate): the corpus is joined to `Document`
 on every single retrieval, both to fetch the citation title *and* to enforce the tenant scope. A
@@ -278,9 +292,11 @@ These are not estimates. Each is a constant with a rationale.
 
 | Limit | Value | Enforced at | Why this value |
 |---|---|---|---|
-| Request body | 1 MB | `express.json()` | Sits *above* the content limit so oversized input fails with a field message, not a bare 413 |
-| Document title | 200 chars | `createDocumentSchema` | — |
-| Document content | 200,000 chars | `createDocumentSchema` | Deliberately below the 1 MB body cap |
+| Request body (JSON) | 1 MB | `express.json()` | Sits *above* the content limit so oversized input fails with a field message, not a bare 413. **Does not apply to uploads** — see the row below |
+| Upload file size | 10 MB | `multer` `limits.fileSize` | The *only* bound on a multipart body. `express.json()` is content-type-gated: it sees `multipart/form-data`, calls `next()` without reading a byte, and its 1 MB limit never engages |
+| Uploaded PDF pages | 200 | `lib/pdf.ts` | Page count, not byte count, drives extraction cost — a 2 MB file can hold thousands of pages, so the size cap alone bounds nothing |
+| Document title | 200 chars | `createDocumentSchema` | Optional on the upload route, where it defaults to the sanitised filename |
+| Document content | 200,000 chars | `createDocumentSchema` + upload route | Deliberately below the 1 MB body cap. Enforced a second time in the upload route because extracted text never passes through a body schema. **Rejected, never truncated** — a silently half-ingested document answers "not in your documents" for everything past the cut |
 | Question length | 1,000 chars | `askSchema` | Far above a real question, far below the embedder's 8,191-token input cap |
 | `k` (chunks retrieved) | 1–10, default 5 | `askSchema` | Feeds straight into the prompt; uncapped `k` is a way for a client to force an arbitrarily expensive request |
 | Chunk size / overlap | 1,000 / 200 chars | `lib/chunk.ts` | ⚠️ **Chosen by judgement. Unvalidated.** M7 exists to settle this. |
@@ -429,6 +445,12 @@ chronological log with rationale is in [STATUS.md](../STATUS.md).
 | pg-boss on the existing DB | BullMQ + Redis | No second datastore; jobs commit with the rows they produce |
 | Separate worker service | Worker thread inside `api` | Cloud Run throttles CPU outside requests (§3.2) |
 | Embedding model hardcoded, chat model in env | Both configurable | Changing the embedding model invalidates every stored vector |
+| PDF parsed at the edge; pipeline stays text-only | Teach ingestion about file formats | One conversion point. `ingestDocument` never learns that PDFs exist, so every future format is a new parser rather than a new branch in the pipeline. |
+| Separate `POST /documents/upload` | One route sniffing its own `Content-Type` | Two body parsers, two validation schemas, two error taxonomies. Branching on a header inside one handler couples failure modes that have nothing to do with each other; the JSON route stays byte-for-byte unchanged. |
+| File type decided by magic bytes | Trusting `Content-Type` / the file extension | Both are client-supplied claims — `curl -F "file=@evil.html;type=application/pdf"` asserts whatever it likes. The leading `%PDF-` bytes are evidence. Necessary, not sufficient: the real guarantee is that pdf.js parses it and that we never store or re-serve the file. |
+| Uploaded bytes discarded after extraction | Persist the original file | No storage tier, no lifecycle policy, no deletion path for a file nothing ever reads (§5) |
+| Dedupe hashes extracted **text**, not file bytes | `sha256` of the upload | Re-exporting a document changes its bytes (timestamps, producer strings, compression) but not its meaning — byte-hashing would dedupe *less* than intended and re-embed identical content. Consequence accepted: two PDFs differing only in images collapse to one document, so the UI names the existing title. |
+| Page-aware chunking, one page at a time | Concatenate, then map offsets back to pages | A chunk spanning a page break has no single honest page to cite, and a wrong citation is worse than a split paragraph. Known cost in §11. |
 | No distance threshold on retrieval | Cutoff on similarity | Semantic search always returns *something*; a threshold is a magic number tuned by vibes. The **prompt** does the refusing — verified: an off-corpus question retrieves at similarity 0.33 and still returns the exact refusal string. |
 | Fixed `REFUSAL` constant | "Say you don't know" | Left to its judgement the model writes a different apology each time, and a waffle is indistinguishable from a weak answer. A verbatim string is detectable by the UI and assertable by an eval. |
 | `temperature: 0` | Any creativity | Grounded QA, not writing. Also makes M7 meaningful — under a non-deterministic model a regression is indistinguishable from noise. |
@@ -440,10 +462,20 @@ chronological log with rationale is in [STATUS.md](../STATUS.md).
 | Milestone | Contents | Status |
 |---|---|---|
 | M1–M6 | DB · auth · ingestion · documents UI · retrieval · streamed answers | ✅ |
-| **M7 — evals** | Golden question set · hit-rate@k / MRR · groundedness · refusal accuracy | ➡️ **next** |
+| PDF upload | Multipart route · pdf.js extraction · page-aware chunking · page-level citations | ✅ |
+| **M7 — evals** | Golden question set · hit-rate@k / MRR · groundedness · refusal accuracy · **per-page vs. whole-document chunking** | ➡️ **next** |
 | M8 — async write path | pg-boss · worker service · retry · `202 Accepted` · reprocess job | ⬜ |
 | M9 — deployment | Cloud Run × 2 · Vercel · CI | ⬜ |
 | Hardening | Refresh tokens · rate limiting · helmet · httpOnly cookies · automated tests | ⬜ |
+
+**PDF upload added a fourth number for M7 to settle, and a structural one.** Chunking each page
+independently makes the page boundary a *hard* chunk boundary: `chunkOverlap` cannot bridge a
+paragraph that spans two pages, and `chunkSize` acquires a second maximum that appears in no config
+— the length of a page. A 300-page PDF of short pages yields ~300 tiny chunks instead of ~45
+well-sized ones, and small chunks embed into vague vectors that retrieve on surface keywords rather
+than meaning. The fix is a merge pass over consecutive short pages, which needs a page *range* on
+`Chunk` and is therefore a schema change, not a tweak. Left unbuilt on purpose: whether it matters
+depends entirely on the corpus, and hit-rate@k can answer that where judgement cannot.
 
 **M7 before M8, deliberately.** The eval harness is smaller, already specified, and turns `k=5`,
 `chunkSize=1000`, and `chunkOverlap=200` from judgement calls into measured numbers. It also

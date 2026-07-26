@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { Prisma } from "../../generated/prisma/client";
 import type { DocStatus } from "../../generated/prisma/enums";
 import { prisma } from "../../lib/prisma";
-import { chunkText } from "../../lib/chunk";
+import { chunkPages, chunkText } from "../../lib/chunk";
 import { embed } from "../../lib/embed";
 import { HttpError } from "../../lib/http-error";
 
@@ -11,15 +11,26 @@ import { HttpError } from "../../lib/http-error";
 // wrote — chunkText (split) and embed (vectorize) — and persists the result.
 //
 // Note on scope: this takes `content` as already-extracted plain text. Turning
-// a PDF/upload into text is a separate upstream concern (a parser), so it stays
-// out of here — this function only cares about text in, chunks out. That parser
-// is also where the filename and mime type belong: the schema deliberately
-// stores neither, only a human-facing `title`.
+// a PDF/upload into text is a separate upstream concern (a parser — now
+// lib/pdf.ts), so it stays out of here: this function only cares about text in,
+// chunks out. That parser is also where the filename and mime type belong: the
+// schema deliberately stores neither, only a human-facing `title`.
 
 type IngestInput = {
   userId: string;
   title: string;
   content: string;
+  // Present only when the source had page structure (a PDF, via lib/pdf.ts).
+  // When given, chunking becomes page-aware so citations can name a page.
+  //
+  // WHY `content` IS STILL REQUIRED ALONGSIDE THIS, rather than deriving one
+  // from the other:
+  //   - `content` remains the reprocessing source of truth (see the schema
+  //     comment on Document.content), so a future re-chunk needs no PDF.
+  //   - dedupe hashes `content`, so a PDF and a paste of the same text collapse
+  //     to one document. The caller must join `pages` the same way every time
+  //     for that to hold — see uploadPdfDocument in document.routes.ts.
+  pages?: string[];
   // A seam for tests: swap in a stub embedder to exercise the DB path without
   // paying for (or depending on the availability of) a real OpenAI call.
   // Production callers omit it and get the real `embed`.
@@ -72,6 +83,7 @@ export async function ingestDocument({
   userId,
   title,
   content,
+  pages,
   embedFn = embed,
 }: IngestInput): Promise<IngestResult> {
   const contentHash = hashContent(content);
@@ -122,7 +134,11 @@ export async function ingestDocument({
     //    chunking is CPU work and embedding is a network round-trip to OpenAI.
     //    Holding a Postgres transaction open across a slow external API call
     //    would pin a connection and invite timeouts — a classic footgun.
-    const chunks = await chunkText(content);
+    //    One branch, one difference: page-aware splitting when the source had
+    //    pages. Everything after this point is identical for both paths, which
+    //    is the point of converting a PDF to text at the edge — the pipeline
+    //    never learns that PDFs exist.
+    const chunks = pages ? await chunkPages(pages) : await chunkText(content);
 
     if (chunks.length === 0) {
       // Empty/whitespace-only input — nothing to embed. Still a valid outcome.
@@ -152,6 +168,12 @@ export async function ingestDocument({
             documentId: doc.id,
             content: c.content,
             chunkIndex: c.chunkIndex,
+            // `?? null` rather than leaving it undefined: Prisma omits an
+            // undefined field from the INSERT entirely, which happens to give
+            // the same result here (the column is nullable) but stops being
+            // equivalent the moment the column gains a default. Being explicit
+            // costs nothing and says "no page" instead of "no opinion".
+            page: c.page ?? null,
           })),
         });
 

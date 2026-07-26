@@ -73,6 +73,17 @@ type RequestOptions = {
   token?: string;
 };
 
+// Turns the api's error body into an ApiError. Shared by all three transports
+// below (JSON, multipart, streaming) so a 429 from the rate limiter reads the
+// same however it was triggered — the api always answers `{ error }`, and the
+// one place that shape is decoded should be one place.
+function apiError(status: number, data: unknown): ApiError {
+  const body = data as { error?: unknown; details?: ValidationIssue[] } | null;
+  const message =
+    typeof body?.error === "string" ? body.error : `Request failed (${status})`;
+  return new ApiError(status, message, body?.details);
+}
+
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, token } = options;
 
@@ -96,12 +107,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   // The api always answers JSON; parse defensively in case a proxy returns HTML.
   const data = await res.json().catch(() => null);
 
-  if (!res.ok) {
-    const message =
-      (data && typeof data.error === "string" && data.error) ||
-      `Request failed (${res.status})`;
-    throw new ApiError(res.status, message, data?.details);
-  }
+  if (!res.ok) throw apiError(res.status, data);
 
   return data as T;
 }
@@ -155,6 +161,60 @@ export function createDocument(
   });
 }
 
+// The upload ceiling, mirrored from MAX_UPLOAD_BYTES in the api's
+// document.routes.ts. Checked client-side purely so a 40 MB file is refused
+// instantly instead of after a 40 MB upload — the server limit is the one that
+// actually enforces anything.
+export const MAX_PDF_BYTES = 10 * 1024 * 1024;
+
+// PDF upload. Resolves to the SAME `{ document, deduped }` shape as
+// createDocument, which is what lets the documents page reuse one handler, one
+// renderer and one polling loop for both ingestion routes.
+//
+// WHY THIS DOESN'T GO THROUGH `request()`
+// Same reason streamAsk doesn't: `request()` unconditionally JSON.stringifies
+// the body and sets `Content-Type: application/json`. Neither is right here.
+//
+// THE ONE THING TO GET RIGHT: do NOT set Content-Type yourself. The browser
+// generates it for a FormData body as
+// `multipart/form-data; boundary=----WebKitFormBoundary…`, and that boundary
+// token is what tells the server where each part begins. Hard-code the header
+// and the boundary is missing, multer cannot split a body it was told is
+// multipart, and the failure surfaces as an opaque server error — which sends
+// you debugging the backend for something the client did.
+export function uploadPdf(
+  token: string,
+  file: File,
+  title?: string,
+): Promise<{ document: DocumentSummary; deduped: boolean }> {
+  const form = new FormData();
+  // Field name must match `upload.single("file")` on the server.
+  form.append("file", file);
+  // Only send a title when there is one — the api falls back to the filename,
+  // and an empty string would just be noise on the wire.
+  if (title?.trim()) form.append("title", title.trim());
+
+  return uploadRequest("/documents/upload", form, token);
+}
+
+async function uploadRequest<T>(path: string, form: FormData, token: string): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      method: "POST",
+      // Authorization only. See the Content-Type note above.
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+  } catch {
+    throw new ApiError(0, "Can't reach the server. Is the API running on port 4000?");
+  }
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw apiError(res.status, data);
+  return data as T;
+}
+
 export function listDocuments(token: string): Promise<{ documents: DocumentSummary[] }> {
   return request<{ documents: DocumentSummary[] }>("/documents", { token });
 }
@@ -179,6 +239,10 @@ export type Source = {
   documentId: string;
   documentTitle: string;
   chunkIndex: number;
+  // Set only for documents ingested from a PDF, where chunking is page-aware.
+  // Null for every pasted-text document and null forever — so the UI needs a
+  // real fallback, not a loading state.
+  page: number | null;
   content: string;
   similarity: number;
 };
@@ -229,15 +293,7 @@ export async function* streamAsk(
   // a real status code — the server defers its headers precisely so this stays
   // possible. Handle it exactly like every other request, so a 401 here behaves
   // the same as a 401 anywhere else.
-  if (!res.ok) {
-    const data = await res.json().catch(() => null);
-    throw new ApiError(
-      res.status,
-      (data && typeof data.error === "string" && data.error) ||
-        `Request failed (${res.status})`,
-      data?.details,
-    );
-  }
+  if (!res.ok) throw apiError(res.status, await res.json().catch(() => null));
 
   if (!res.body) throw new ApiError(0, "Streaming is not supported in this browser.");
 

@@ -27,6 +27,7 @@ flowchart TD
         QS["query.service"]
     end
     subgraph lib["lib — transport-free"]
+        PD["pdf"]
         CH["chunk"]
         EM["embed"]
         RE["retrieve"]
@@ -43,6 +44,7 @@ flowchart TD
     AR --> AS
     DR --> DS
     QR --> QS
+    DR --> PD
     AS --> JW
     AS --> PW
     DS --> CH
@@ -63,6 +65,14 @@ flowchart TD
 | `routes/` | HTTP, status codes, zod parsing | business logic | Review — each router is ~50 lines |
 | `services/` | orchestration, transactions | `express`, `res`, headers | `query.service` yields **events**, not HTTP |
 | `lib/` | one job each | HTTP, or each other's internals | No `express` import anywhere in `lib/` |
+
+**One arrow breaks the pattern, and it should be called out rather than smoothed over:**
+`document.routes → lib/pdf`. The upload route converts an HTTP artifact (a multipart buffer) into
+domain input (text + pages), which is defensible as transport-adaptation — the same category of
+work as zod-parsing a body. What is *less* defensible is that the route also joins the extracted
+pages into `content`, and that join is part of the **dedupe contract**: `content` is what gets
+hashed, so the separator must never change, yet it lives one layer away from `hashContent`. Logged
+in §10.
 
 **The load-bearing case is `query.service`.** It is an async generator yielding a typed
 `QueryEvent` union and never touches `res`. Swapping NDJSON for SSE or WebSockets means rewriting
@@ -117,7 +127,7 @@ erDiagram
         string documentId FK
         string content
         int chunkIndex "ordinal within doc — the citation anchor"
-        int page "nullable — from a PDF parser"
+        int page "nullable — 1-based, populated only for PDFs"
         int charStart "nullable"
         int charEnd "nullable"
         vector embedding "vector(1536), nullable"
@@ -213,6 +223,8 @@ sequenceDiagram
     C->>R: POST /documents {title, content}
     R->>R: createDocumentSchema.parse — 400 on failure
     R->>S: ingestDocument({userId from TOKEN, ...})
+
+    Note over C,R: PDF variant — POST /documents/upload<br/>multer(memory, 10MB) → %PDF- magic bytes<br/>→ extractPdf → 422 if no text<br/>→ pages.join("\n\n") → same call below, plus `pages`
 
     S->>S: sha256(content)
     S->>DB: findUnique(userId_contentHash)
@@ -475,7 +487,8 @@ Verified: an abort leaves no unhandled rejection.
 | `POST` | `/auth/signup` | — | `201 {user, token}` | `400` invalid · `409` email taken |
 | `POST` | `/auth/login` | — | `200 {user, token}` | `400` · `401` |
 | `GET` | `/me` | ✅ | `200 {user}` | `401` |
-| `POST` | `/documents` | ✅ | `201 {document, deduped:false}` · `200 {…, deduped:true}` | `400` · `401` · `413` · `500` |
+| `POST` | `/documents` | ✅ | `201 {document, deduped:false}` · `200 {…, deduped:true}` | `400` · `401` · `413` · `429` · `500` |
+| `POST` | `/documents/upload` | ✅ | *identical shape* — `201` / `200 {…, deduped:true}` | `400` not-a-PDF, corrupt, password-protected, no file, wrong field, text over 200k · `401` · `413` >10 MB · **`422`** parsed but no extractable text · `429` · `500` |
 | `GET` | `/documents` | ✅ | `200 {documents: Summary[]}` | `401` |
 | `GET` | `/documents/:id` | ✅ | `200 {document}` | `401` · **`404`** |
 | `POST` | `/queries` | ✅ | `200` NDJSON stream | `400` · `401` · `500` before headers; in-band `error` after |
@@ -488,6 +501,9 @@ Verified: an abort leaves no unhandled rejection.
 | **`404`, never `403`**, for another user's document | A `403` confirms the id exists, letting an attacker enumerate ids to map another tenant's library. Both 404s are byte-identical, so the message cannot become an oracle. |
 | No zod validation on `:id` | Malformed, non-existent, and not-yours all answer identically. A `400` for "wrong format" would be the only distinguishable response, for no benefit. ⚠️ Depends on `Document.id` being a **text** column — switching to `@db.Uuid` makes Postgres reject the cast and turns this into a 500. |
 | Unknown body keys **stripped**, not rejected | zod's object default. A client POSTing `status: "READY"` to skip the pipeline has the field silently dropped. |
+| **`422`, not `400`**, for a scanned PDF | The request was well-formed *and* the file parsed cleanly — there is simply nothing in it to index. A `400` would send the user looking for a malformed file. The message names the actual cause ("this looks like a scanned PDF") because "empty document" describes the symptom, not the fix. |
+| **`413`, not `400`**, for an oversized file | Semantically the payload-too-large case. Required its own `MulterError` branch in the error middleware: multer's error carries `code` but *not* the `type`/`status` pair the body-parser branch sniffs for, so before that branch existed a 12 MB upload returned `500 Internal Server Error` — wrong status, and it tells the user nothing they can act on. |
+| Upload returns the **same body shape** as the JSON route | Lets the client keep one `DocumentSummary` type, one renderer, and one polling loop across both ingestion routes. The cost is one extra `SELECT` per upload; the saving is an entire duplicated code path in the UI. |
 
 ### The `/queries` NDJSON stream
 
@@ -495,7 +511,7 @@ Verified: an abort leaves no unhandled rejection.
 `X-Accel-Buffering: no`
 
 ```jsonc
-{"type":"sources","sources":[{"n":1,"documentId":"…","documentTitle":"…","chunkIndex":0,"content":"…","similarity":0.82}]}
+{"type":"sources","sources":[{"n":1,"documentId":"…","documentTitle":"…","chunkIndex":0,"page":7,"content":"…","similarity":0.82}]}
 {"type":"token","value":"The "}
 {"type":"token","value":"answer "}
 {"type":"done","answer":"The answer is … [1]"}
@@ -510,6 +526,13 @@ UX silently disappears **in production and only in production**.
 `done` carries the fully assembled answer so a client that buffered nothing (a test, a `curl` pipe)
 still gets complete text, and so "the stream ended" is distinguishable from "the connection
 dropped."
+
+`page` is `number | null` — a real page for chunks that came from a PDF, `null` for every
+pasted-text document and `null` **permanently**, not "not yet". The client must therefore render a
+fallback rather than a loading state. It deliberately does *not* fall back to showing `chunkIndex`:
+"chunk 12" names an internal ordinal the reader has no way to look up, which is the opposite of
+what a citation is for. Verified with a mixed corpus — one query returned a pasted source at
+`page: null` alongside PDF sources carrying real page numbers, in the same `sources` array.
 
 ### Client-side stream parsing ✅
 
@@ -537,7 +560,11 @@ render as literal text and become a chip the instant it completes.
 | Auth | missing/malformed/expired token | `401` — all failure modes identical | `requireAuth` |
 | Not found / not yours | `findFirst` returns null | `404` — deliberately indistinguishable | service |
 | Conflict | Prisma `P2002` | `409`, or dedupe recovery in ingestion | service |
-| Payload too large | `express.json()` limit | `413` | body-parser |
+| Payload too large (JSON) | `express.json()` limit | `413` | body-parser |
+| Payload too large (upload) | `multer` `limits.fileSize` throws `MulterError` | `413` | `errorHandler` — **own branch**; `MulterError` has `code` but no `type`/`status`, so it does not match the body-parser predicate |
+| Malformed multipart | `MulterError` `LIMIT_UNEXPECTED_FILE` / `LIMIT_FILE_COUNT` | `400` | `errorHandler` |
+| Unparseable file | magic-byte check, or pdf.js throwing | `400` — "isn't a PDF" / "may be corrupt" / "password-protected" | `lib/pdf.ts` throws `HttpError` |
+| Parsed but empty | `hasNoText()` — every page blank | `422` | upload route |
 | Upstream failure | OpenAI, Postgres | `500`, or in-band `error` if mid-stream | service / route |
 | **Post-header stream failure** | anything after `flushHeaders()` | `{type:"error"}` + clean close | `query.routes` |
 
@@ -580,6 +607,10 @@ Real ones, from the code — not a list assembled to look longer.
 | No automated tests | **High** — `retrieve.ts` tenant scoping is uncovered raw SQL | supertest via `createApp()`; start with tenant isolation |
 | `WEB_ORIGIN` bypasses zod validation 🟡 | Medium — silent CORS misconfiguration in prod | Move into `envSchema` |
 | `k`, `chunkSize`, `chunkOverlap` unvalidated | Medium — chosen by judgement | M7 eval harness |
+| Per-page chunking makes the page a **hard chunk boundary** | Medium — `chunkOverlap` cannot bridge a page break, and a PDF of short pages yields many tiny, weakly-retrievable chunks | Merge pass over consecutive short pages — needs a page *range* on `Chunk`, so a schema change. Gated on M7 measuring whether it matters. |
+| Page-join lives in the route, not the service | Low — but it is part of the dedupe contract (§1) | Move extraction + join into a `ingestPdfDocument` service function; the route goes back to being thin |
+| Uploaded file bytes are discarded | Low — deliberate (HLD §5), but re-processing cannot recover text a parser missed | Only matters if OCR or a better parser enters scope |
+| `Math.sumPrecise` shim in `lib/pdf.ts` | Low — pdf.js calls a TC39 Stage 3 method absent from Node 24's V8 | Delete on Node 25+. Guarded, so it self-disables. |
 | Answers are discarded | Medium — blocks history, caching, scoring | `Query` table |
 | Token in `localStorage` 🟡 | Medium — XSS-readable | httpOnly cookies (forces the stream off Bearer) |
 | No refresh token, 1h expiry 🟡 | Medium | Refresh + rotation |

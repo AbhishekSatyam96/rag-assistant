@@ -32,6 +32,10 @@ export type RetrievedChunk = {
   documentId: string;
   documentTitle: string;
   chunkIndex: number;
+  // The source page, when the document had pages (a PDF). NULL for every
+  // pasted-text document — and permanently so, not "not yet", which is why the
+  // null branch in the citation UI is a real state rather than a placeholder.
+  page: number | null;
   content: string;
   // Cosine DISTANCE, straight from `<=>`: 0 = identical direction, 1 =
   // orthogonal, 2 = opposite. Lower is better — the opposite of the intuition
@@ -62,6 +66,7 @@ type ChunkRow = {
   documentId: string;
   documentTitle: string;
   chunkIndex: number;
+  page: number | null;
   content: string;
   distance: number;
 };
@@ -132,6 +137,7 @@ export async function retrieveChunks({
         c."documentId"   AS "documentId",
         d.title          AS "documentTitle",
         c."chunkIndex"   AS "chunkIndex",
+        c.page           AS "page",
         c.content        AS "content",
         (c.embedding <=> ${literal}::vector) AS "distance"
       FROM "Chunk" c

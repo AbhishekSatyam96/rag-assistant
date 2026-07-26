@@ -206,8 +206,25 @@ The app calls a paid API on behalf of anyone who signs up, and signup is open. T
 
 **Still open — the layer none of this provides:** rate limits count requests, not dollars. Metering actual spend needs `stream_options: { include_usage: true }` on the completion call and somewhere to store the token counts — i.e. the `Query` table below, which would then be paying for itself three times over (history, evals, budget enforcement).
 
+## 📄 PDF upload — DONE 2026-07-26
+
+Previously listed here as deliberately skipped, on the reasoning that "`pdf-parse` demonstrates nothing about engineering judgement." That was right about the naive version and wrong about this one: `Chunk.page` had existed since the first schema and was never populated, and a PDF is the only source that can fill it. So the feature is not "accept a file" — it is **page-aware chunking, which upgrades a citation from "chunk 12" (an internal detail nobody can verify) to "page 7" (something a reader can go and check).**
+
+- **`POST /documents/upload`**, multipart, separate from the JSON `POST /documents` rather than one route sniffing its own Content-Type — two body parsers with different failure modes and different validation don't belong behind one branch. Both answer the identical `{ document, deduped }` shape, so the client reuses one type, one renderer and one polling loop.
+- **`unpdf`** (a prebuilt ESM bundle of Mozilla's pdf.js), *not* `pdf-parse` — which wraps a 2018 fork and returns one concatenated string, making page attribution impossible. `pdfjs-dist` direct needs worker config that buys nothing here.
+- **`multer` with `memoryStorage`**, capped at 10 MB / 1 file. No temp files to clean up on any failure path. **`express.json({ limit: "1mb" })` does NOT apply to uploads** — body parsers are content-type-gated, so `multer`'s `limits.fileSize` is the only bound that exists. Getting this wrong means an unbounded upload.
+- **Content-type is a claim; magic bytes are evidence.** `file.mimetype` is copied from a client-written header — `curl -F "file=@evil.html;type=application/pdf"` lies freely. The `%PDF-` check on the leading bytes is the actual gate. (Verified: the lying-content-type case returns 400.)
+- **Dedupe still hashes the extracted TEXT**, not the file bytes. Deliberate: re-exporting the same document embeds new timestamps, so byte-hashing would dedupe *less* than intended and re-embed the same content. Consequence to know: two PDFs differing only in images collapse into one document, so the UI names the existing title instead of a bare "already ingested".
+- **Extracted text over 200k chars is REJECTED, never truncated.** A silently half-ingested document produces a confident "that isn't in your documents" for anything past the cut — a failed upload is recoverable, a silently incomplete corpus is not.
+- **`MulterError` needed its own branch in `middleware/error.ts`**: it carries `code` but not the `type`/`status` pair `isBodyParserError` sniffs for, so an oversized file was landing on the generic 500.
+- **`Math.sumPrecise` shim in `lib/pdf.ts`** — pdf.js calls this TC39 Stage 3 method, absent in Node 24's V8. Text extraction still succeeds (pdf.js catches it; the call sites are font tables and XFA layout) but it logged a warning per upload. Guarded, uses Neumaier compensated summation, delete on Node 25+.
+
+**Known limitation, written into `lib/chunk.ts`:** chunking per page makes the page boundary a hard chunk boundary, so `chunkOverlap` cannot bridge a paragraph spanning two pages, and `chunkSize` gains a second invisible maximum — the page length. A 300-page PDF of short pages yields ~300 tiny chunks whose embeddings are too vague to retrieve well. The fix is a merge pass over consecutive short pages, which needs a page *range* on `Chunk` (a schema change) — deferred to the eval harness on purpose, so the decision comes from hit-rate@k rather than from guessing.
+
+**Verified end to end (2026-07-26)** against a real 6-page PDF: 201 on first upload with title derived from the filename, 200 + `deduped` on re-upload, 28 chunks with continuous `chunkIndex` and correct per-page attribution, and citations returning real page numbers through `/queries` while pasted documents return `page: null` in the same result set. Rejections confirmed: non-PDF 400, forged content-type 400, missing file 400, wrong field name 400, 11 MB 413, text-less (scanned) PDF 422, unauthenticated 401.
+
 ## 🚧 Not built yet (deliberately deferred)
-- **File upload / parser path** (file → text). Deliberately skipped: pasting text already proves the pipeline, and `pdf-parse` demonstrates nothing about engineering judgement.
+- **OCR for scanned PDFs.** Image-only PDFs are detected and rejected with a 422 that names the cause; extracting their text needs a genuinely different (and much more expensive) capability.
 - **Auth hardening:** refresh-token rotation, server-side logout/revocation, `helmet` headers. (Rate limiting on `/auth/*` — DONE, see the abuse & cost controls section.)
 - **Eval harness** (M7, next — golden question set, retrieval hit-rate).
 - **Query persistence** — answers are assembled server-side (`done.answer`) then discarded. A `Query` table would unlock history, caching, and scoring stored answers.

@@ -105,7 +105,7 @@ export default function DocumentsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Documents</h1>
           <p className="mt-1 text-sm text-black/50 dark:text-white/50">
-            Paste text to chunk and embed it for retrieval.
+            Paste text or upload a PDF to chunk and embed it for retrieval.
           </p>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1 text-xs">
