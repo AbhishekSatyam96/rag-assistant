@@ -1,118 +1,91 @@
 # RAG Knowledge Assistant
 
-Upload your documents, ask questions about them, get **streamed answers grounded in your own text with inline citations** — and a refusal when the corpus doesn't contain the answer.
+Upload your documents, ask questions about them, and get **streamed answers grounded in your own text with inline citations** — plus an honest refusal when your documents don't contain the answer.
 
-Built as a proof-piece: a real Express backend (deliberately *not* Next.js API routes), Postgres + pgvector for retrieval, and a Next.js frontend that streams tokens as they're generated.
+**▶ Live at [rag.abhisheksatyam.com](https://rag.abhisheksatyam.com)** — sign up, paste a document or drop a PDF, and ask.
 
-**Live:** [rag.abhisheksatyam.com](https://rag.abhisheksatyam.com) → [api.abhisheksatyam.com](https://api.abhisheksatyam.com) — two Vercel projects from this one repo. See [docs/deployment.md](docs/deployment.md) for what that cost in design terms.
-
-```
-┌──────────────┐        ┌───────────────────────┐        ┌──────────────────┐
-│  Next.js 16  │  JSON  │      Express 5        │        │  Neon Postgres   │
-│   web/:3000  │ ─────► │      api/:4000        │ ─────► │   + pgvector     │
-│              │ ◄───── │                       │ ◄───── │   (HNSW index)   │
-│ /documents   │ NDJSON │ auth · documents      │        └──────────────────┘
-│ /ask         │ stream │ queries (RAG)         │        ┌──────────────────┐
-└──────────────┘        └───────────────────────┘ ─────► │     OpenAI       │
-                                                         │ embeddings + LLM │
-                                                         └──────────────────┘
-```
-
-**Design docs:** [HLD](docs/hld.md) — topology, capacity, failure modes, scaling ladder ·
-[LLD](docs/lld.md) — data model, state machines, sequence diagrams, API contracts ·
-[Deployment](docs/deployment.md) — what shipping to Vercel cost architecturally, and what it fixed.
+<!-- SCREENSHOT: add a shot of /ask mid-stream (answer partially typed, citation chips visible, sources listed).
+     Save it to docs/images/ask.png and replace this comment with:
+     ![Asking a question](docs/images/ask.png)
+     A second shot of /documents showing a PDF processed to READY works well underneath. -->
 
 ---
+
+## What it does
+
+- **Bring your own text.** Paste content directly, or upload a PDF — text is extracted per page, so citations read "page 7", not "chunk 12".
+- **Answers you can check.** Every claim carries a numbered citation back to the exact passage it came from, listed alongside the answer.
+- **It says "I don't know."** Ask something your documents don't cover and it refuses, rather than inventing a confident answer.
+- **Answers stream as they're written**, with sources appearing before the first word of the answer.
+- **Your documents are yours.** Every query is scoped to the signed-in user at the database level.
 
 ## How it works
 
-### Ingestion (write path)
-
 ```
-POST /documents  →  sha256 dedupe  →  split (1000 chars / 200 overlap)
-                 →  embed batches of 100 (text-embedding-3-small, 1536-dim)
-                 →  ONE transaction: insert chunks + UPDATE embeddings + flip status
-```
-
-A document moves `PENDING → PROCESSING → READY | FAILED`. Chunking and embedding happen **outside** any database transaction — a Postgres transaction is never held open across a slow third-party API call. Content is hashed first, so re-uploading identical text costs nothing and returns `200 { deduped: true }` instead of a misleading `201 Created`.
-
-### Retrieval (read path)
-
-```
-POST /queries  →  embed the question  →  ANN search over the caller's chunks only
-               →  numbered context block  →  LLM at temperature 0
-               →  NDJSON: sources → token* → done | error
+┌────────────────────────┐        ┌────────────────────────┐        ┌──────────────────┐
+│ rag.abhisheksatyam.com │  JSON  │ api.abhisheksatyam.com │        │  Neon Postgres   │
+│   Next.js 16 · Vercel  │ ─────► │   Express 5 · Vercel   │ ─────► │   + pgvector     │
+│                        │ ◄───── │                        │ ◄───── │   (HNSW index)   │
+│ /documents             │ NDJSON │ auth · documents       │        └──────────────────┘
+│ /ask                   │ stream │ queries (RAG)          │        ┌──────────────────┐
+└────────────────────────┘        └────────────────────────┘ ─────► │     OpenAI       │
+                                                                    │ embeddings + LLM │
+                                                                    └──────────────────┘
 ```
 
-Vector search is raw SQL (`ORDER BY embedding <=> $1::vector`) because Prisma has no model of the pgvector operators. That means the compiler stops enforcing tenant isolation, so `WHERE d."userId" = ...` is written into the query by hand and flagged with a comment block — see [retrieve.ts](api/src/lib/retrieve.ts).
+**Ingestion.** A document is hashed, split into overlapping chunks, embedded in batches, and written in a single transaction that inserts the chunks and flips the document to `READY` together. Embedding happens *outside* the transaction — a Postgres transaction is never held open across a slow third-party API call. Re-uploading identical text costs nothing and is deduped by the database.
 
-Sources are emitted **before** the first token: retrieval is fast, generation is slow, and filling the screen with citations covers the part of the wait the user actually feels.
+**Retrieval.** The question is embedded, matched against the caller's chunks by approximate-nearest-neighbour search, and the top passages become a numbered context block for the model at temperature 0. Sources are streamed **before** the first token: retrieval is fast and generation is slow, so the citations fill the part of the wait the user actually feels.
 
----
+Built deliberately as a real Express backend rather than Next.js API routes — the point was to build and defend a backend, not to let a framework manage one.
 
 ## Stack
 
-| Layer | Choice | Why |
-|---|---|---|
-| API | Express 5 + TypeScript (ESM, `tsx`) | A real backend, not framework-managed routes |
-| ORM | Prisma 7 + `@prisma/adapter-pg` | Typed queries; raw SQL where pgvector needs it |
-| DB | Neon Postgres + pgvector 0.8 | Serverless Postgres, HNSW index for ANN search |
-| Embeddings | `text-embedding-3-small` (1536-dim) | Hardcoded constant — see decisions below |
-| Generation | `CHAT_MODEL`, default `gpt-4o-mini` | Env var — a model swap is a deploy decision |
-| Chunking | `@langchain/textsplitters` | `RecursiveCharacterTextSplitter` |
-| Auth | `jose` (JWT HS256) + `@node-rs/argon2` | ESM/edge-native; argon2id with prebuilt binaries |
-| Validation | `zod` 4 | Boot-time env validation + per-request body schemas |
-| Web | Next.js 16 · React 19 · Tailwind v4 | App Router, `fetch` + `ReadableStream` for streaming |
+| Layer | Choice |
+|---|---|
+| API | Express 5 + TypeScript (ESM) |
+| ORM | Prisma 7, with raw SQL where pgvector needs it |
+| Database | Neon Postgres + pgvector 0.8, HNSW index |
+| Embeddings | `text-embedding-3-small` (1536-dim) |
+| Generation | `gpt-4o-mini` by default, configurable |
+| Auth | JWT (HS256) via `jose` + argon2id password hashing |
+| Web | Next.js 16 · React 19 · Tailwind v4 |
+| Hosting | Two Vercel projects from one repo |
 
 ---
 
-## API surface
+## A few decisions worth defending
 
-| Method | Route | Auth | Notes |
-|---|---|---|---|
-| `GET` | `/health` | — | `{ status, users }` |
-| `POST` | `/auth/signup` | — | `201 { user, token }` |
-| `POST` | `/auth/login` | — | `200 { user, token }` |
-| `GET` | `/me` | ✅ | Identity decoded from the token |
-| `POST` | `/documents` | ✅ | `{ title, content }` → `201`, or `200` when deduped |
-| `GET` | `/documents` | ✅ | Summaries — no `content`, no embeddings |
-| `GET` | `/documents/:id` | ✅ | `404` for another user's id, never `403` |
-| `POST` | `/queries` | ✅ | `{ question, k? }` → NDJSON stream |
+The full set lives in the design docs below — each is also written into the code it governs. Six that were worth the argument:
 
-`requireAuth` is applied at the **mount point**, not per route, so a route added later cannot accidentally ship unauthenticated.
+- **HNSW, not IVFFlat.** IVFFlat learns cluster centroids from existing data, so building it on a near-empty table produces a permanently bad index. HNSW builds incrementally — the only real option for a table that grows one upload at a time.
 
-### The `/queries` stream
+- **The index operator class and the query operator have to agree.** `vector_cosine_ops` in the index, `<=>` in the query. A mismatch never raises an error; it just silently stops using the index. The symptom is "slow but correct", which is exactly the kind of bug that survives all the way to production. Verified with `enable_seqscan = off` that `<=>` really plans as an index scan.
 
-One JSON object per line (`application/x-ndjson`):
+- **`404`, not `403`, for another user's document.** A `403` confirms the id exists, which lets someone enumerate ids to map another tenant's library. Both 404s are byte-identical so the message can't become an oracle. Ownership lives in the `WHERE` clause — never a lookup followed by an `if`.
 
-```jsonc
-{"type":"sources","sources":[{"n":1,"documentTitle":"…","chunkIndex":0,"content":"…","similarity":0.82}]}
-{"type":"token","value":"The "}
-{"type":"token","value":"answer "}
-{"type":"done","answer":"The answer is … [1]"}
-```
+- **NDJSON, not SSE.** `EventSource` can't set request headers, and auth is a Bearer token — SSE would force the token into the query string, where it lands in server logs, browser history, and `Referer`. That's a constraint, not a preference.
 
-NDJSON rather than SSE because `EventSource` cannot set request headers, and auth is a Bearer token — SSE would force the token into a query string, where it lands in server logs, browser history, and `Referer`. That's a constraint, not a preference.
+- **A fixed refusal string, not "say you don't know."** Left to its own judgement the model writes a different apology every time, and a waffle is indistinguishable from a weak answer. A verbatim constant is something the UI can detect and an eval harness can assert on.
 
----
+- **`trust proxy` is a hop count, never `true`.** Unset, the rate limiter sees the platform's edge and the entire internet shares one bucket. Set to `true`, Express trusts the whole `X-Forwarded-For` chain — and since anyone can send that header, an attacker mints a fresh unlimited bucket per request.
 
-## Data model
+## Design docs
 
-```
-User ──< Document ──< Chunk
-         status, contentHash,   content, chunkIndex,
-         chunkCount             embedding vector(1536)
-```
+This started as an exercise in designing a system properly, not just shipping one. All three mark **built** vs **degraded** vs **designed-not-built** explicitly, including the known gaps.
 
-- `@@unique([userId, contentHash])` — dedupe is enforced by the database, not just checked in code.
-- `chunkCount` is denormalised onto `Document` and written in the same transaction as the rows it counts, so listing documents never needs a `COUNT(*)`.
-- `embedding` is `Unsupported("vector(1536)")` — Prisma treats it as opaque, which is what drives the migration caveat below.
+- **[High-Level Design](docs/hld.md)** — topology, capacity, failure modes, blast radius, and the scaling ladder.
+- **[Low-Level Design](docs/lld.md)** — data model, state machines, sequence diagrams, API contracts, concurrency and idempotency semantics.
+- **[Deployment notes](docs/deployment.md)** — what going live actually broke, what it cost architecturally, and how each piece was verified.
 
 ---
 
 ## Running it locally
 
-**Prerequisites:** Node 20+, pnpm, a Postgres database with the `vector` extension available (Neon works out of the box), and an OpenAI API key. Redis is optional for local development and required in production — see `REDIS_URL` below.
+<details>
+<summary>Setup instructions</summary>
+
+**Prerequisites:** Node 20+, pnpm, a Postgres database with the `vector` extension (Neon works out of the box), and an OpenAI API key. Redis is optional locally, required in production.
 
 ### 1. API
 
@@ -137,11 +110,9 @@ SIGNUP_INVITE_CODE="…"                          # unset = signup open to anyon
 REDIS_URL="redis://localhost:6379"              # optional here, REQUIRED in production
 ```
 
-`SIGNUP_INVITE_CODE` is the emergency brake: set it and `POST /auth/signup` requires a matching `inviteCode`, closing the door without a code change. Set `NEXT_PUBLIC_SIGNUP_INVITE_REQUIRED=true` on the web app at the same time so the signup form shows the field.
+Env is validated by zod at boot, so a missing or malformed variable fails immediately with a named error rather than deep inside a request.
 
-`REDIS_URL` is where the rate limiters keep their counters. Leave it unset locally and they fall back to an in-memory store, so a clone runs with nothing but Postgres. **With `NODE_ENV=production` the process refuses to start without it** — a fallback there would give every instance its own counters, making the effective limit `limit × instances` and the "global" daily cap per-instance. That failure reports correctly in every `RateLimit` header and enforces nothing, so it is deliberately fatal rather than silent.
-
-Env is validated by zod at boot, so a missing or malformed var fails immediately with a named error rather than deep inside a request.
+`REDIS_URL` is where the rate limiters keep their counters. Leave it unset locally and they fall back to an in-memory store, so a fresh clone runs with nothing but Postgres. **With `NODE_ENV=production` the process refuses to start without it** — a per-process fallback on an autoscaling platform would give every instance its own counters, making the effective limit `limit × instances`. That failure reports correctly in every `RateLimit` header while enforcing nothing, so it's deliberately fatal rather than silent.
 
 ```bash
 pnpm exec prisma migrate deploy   # ⚠️ deploy, not dev — see below
@@ -159,7 +130,7 @@ echo 'NEXT_PUBLIC_API_URL="http://localhost:4000"' > .env.local
 pnpm dev                          # http://localhost:3000
 ```
 
-There's no seeded account — sign up at `/signup` (email + password ≥ 8 chars), paste a document at `/documents`, then ask about it at `/ask`.
+There's no seeded account — sign up at `/signup`, add a document at `/documents`, then ask about it at `/ask`.
 
 ### Smoke test
 
@@ -169,77 +140,40 @@ pnpm smoke:ingest           # live: real embeddings
 pnpm smoke:ingest --fake    # deterministic stub, no paid calls
 ```
 
-`ingestDocument` and `retrieveChunks` both accept an optional `embedFn` — a DI seam that lets the database path be exercised without an OpenAI bill.
+`ingestDocument` and `retrieveChunks` both accept an optional `embedFn` — a dependency-injection seam that lets the database path be exercised without an OpenAI bill.
 
 ### ⚠️ `prisma migrate dev` is unsafe on this database
 
-The HNSW index sits on an `Unsupported()` column, so Prisma Migrate can't represent it. `migrate dev` reads that as drift and auto-generates a `DROP INDEX` — this already corrupted migration history once and forced a database reset. **Author migrations by hand (or with `prisma migrate diff`) and apply them with `prisma migrate deploy`**, which skips drift detection. `migrate status` is safe.
+The HNSW index sits on an `Unsupported()` column, so Prisma Migrate can't represent it. `migrate dev` reads that as drift and auto-generates a `DROP INDEX` — this corrupted migration history once already and forced a database reset. **Author migrations by hand (or with `prisma migrate diff`) and apply them with `prisma migrate deploy`**, which skips drift detection. `migrate status` is safe.
 
----
-
-## Decisions worth defending
-
-A selection. Each one is also written into the code it governs, next to the thing it explains — the [HLD](docs/hld.md) and [LLD](docs/lld.md) carry the system- and module-level versions.
-
-- **`vector_cosine_ops` in the index, `<=>` in the query.** The operator class and the operator must agree. Verified with `enable_seqscan = off`: `<=>` plans as an index scan, `<->` (L2) still plans as `Seq Scan + Sort`. A mismatch never errors — it silently stops using the index, so the symptom is "slow but correct", which survives all the way to production.
-- **HNSW, not IVFFlat.** IVFFlat learns cluster centroids from existing data, so building it on a near-empty table produces a permanently bad index. HNSW builds incrementally — the only option for a table that grows one upload at a time.
-- **`hnsw.iterative_scan = 'strict_order'`.** An ANN index knows nothing about `userId`, so Postgres post-filters: it walks the index in distance order and *then* discards other tenants' rows. Ask for top-5 and you can get 2, or 0 — correct, never a leak, but it silently under-returns and gets worse as users are added.
-- **`SET LOCAL`, not `SET`.** `SET` mutates the pooled connection's session, so one query's tuning becomes global config for whichever request gets that connection next. This is also why the read path has a transaction around it at all.
-- **No distance threshold on retrieval.** Semantic search always returns *something*; a cutoff would be a magic number tuned by vibes. The prompt does the refusing — verified: an off-corpus question retrieves a source at similarity 0.33 and still returns the exact refusal string.
-- **A fixed `REFUSAL` constant, not "say you don't know".** Left to its own judgement the model writes a different apology every time, and a waffle is indistinguishable from a weak answer. A verbatim string is something the UI can detect and an eval harness can assert on.
-- **Embedding model hardcoded, generation model an env var.** Changing `CHAT_MODEL` is a deploy decision; changing the embedding model invalidates every vector in the database. One belongs in config, the other must never be a flag someone can flip.
-- **Headers deferred until the first stream event.** A response has exactly one status code, committed at the first byte. Generators are lazy, so retrieval failures still throw while a real status is available; only post-header failures become an in-band `error` event.
-- **`404`, not `403`, for another user's document.** A `403` confirms the id exists, letting an attacker enumerate ids to map another tenant's library. Both 404s are byte-identical so the message can't become an oracle.
-- **Ownership lives in the `WHERE` clause.** `findFirst({ where: { id, userId } })`, never `findUnique({ id })` plus a follow-up `if`. Structural, not one forgotten branch away from a leak.
-- **Citations parsed at render time from the accumulated string.** Mid-stream a marker arrives as `[`, then `[1`, then `[1]`. Re-deriving each render makes a half-typed marker render as literal text and become a chip the instant it completes.
-- **Buffer NDJSON lines and use `TextDecoder({ stream: true })`.** A network chunk respects neither line boundaries nor UTF-8 character boundaries. Both bugs work perfectly on short ASCII answers and break on long or accented ones — the worst possible failure schedule. Verified by feeding the parser a body one byte at a time.
-
----
+</details>
 
 ## Project structure
 
 ```
 api/
-  prisma/
-    schema.prisma
-    migrations/                     # incl. hand-written pgvector + HNSW SQL
+  prisma/            # schema + migrations, incl. hand-written pgvector & HNSW SQL
   src/
-    app.ts                          # createApp() — factored for supertest
-    lib/                            # chunk · embed · retrieve · answer · jwt · env
-    middleware/                     # requireAuth · errorHandler
-    modules/
-      auth/                         # routes → service → schema
-      documents/                    # ingestion + read path
-      queries/                      # RAG orchestration, typed event stream
-    scripts/smoke-ingest.ts
+    lib/             # chunk · embed · retrieve · answer · pdf · jwt · env
+    middleware/      # requireAuth · rate limiting · errorHandler
+    modules/         # auth · documents · queries  (routes → service → lib)
 web/
   src/
-    app/                            # /login /signup /me /documents /ask
-    components/                     # AuthForm · DocumentForm/List · AnswerView · SourceList
-    lib/                            # api.ts (incl. streamAsk) · auth-context · use-require-auth
+    app/             # /login /signup /me /documents /ask
+    components/      # AuthForm · DocumentForm/List · AnswerView · SourceList
+    lib/             # api client (incl. streaming) · auth context
 ```
 
-Backend layering is **routes → service → lib**: routes validate input and pick a status code, services hold orchestration, lib holds transport-free logic. The query service yields typed events and never touches `res` — only the route knows about HTTP, so swapping NDJSON for SSE or WebSockets wouldn't reopen the answer logic.
+Backend layering is **routes → service → lib**: routes validate input and choose a status code, services hold orchestration, lib holds transport-free logic. The query service yields typed events and never touches `res` — only the route knows about HTTP, so swapping NDJSON for SSE or WebSockets wouldn't reopen the answer logic.
 
 ---
 
-## Status & roadmap
+## Status
 
-**Working today:** auth (backend + frontend), document ingestion, the `/documents` dashboard, vector retrieval, and streamed grounded answers with citations at `/ask` — deployed and verified end to end in production, including that streaming really streams and that an off-corpus question still refuses.
+**Working today, deployed and verified end to end:** auth, document ingestion (paste or PDF), the documents dashboard, vector retrieval, and streamed grounded answers with citations — including that streaming really streams, and that an off-corpus question still refuses.
 
-**Next — evaluation harness:** a golden question set, retrieval hit-rate@k / MRR, groundedness and refusal accuracy. It exists to settle the numbers currently chosen by judgement (`k = 5`, `chunkSize 1000`, `chunkOverlap 200`). `temperature: 0` and the fixed refusal string are what make those metrics measurable.
+Because the app spends real money on behalf of anyone who signs up, `/queries` and `/auth/*` carry per-user burst and daily limits, a global daily ceiling, and a cap on concurrent streams — a rate limit bounds requests per window, not simultaneous in-flight generations. Counters live in Redis so they hold across instances.
 
-**Abuse & cost controls:** the app spends real money on behalf of anyone who signs up, so `/queries` carries a burst limit (10/min), a per-user daily budget (50/day), a global daily ceiling, and a cap of 2 concurrent streams — because a rate limit bounds requests per window, not simultaneous in-flight generations. `/auth/*` and document ingestion are limited too, and `SIGNUP_INVITE_CODE` closes signup entirely as a one-config-change lever. The counters live in **Redis**, because the deploy target autoscales and a per-process store would make the effective limit `limit × instances` — so `REDIS_URL` is required at boot in production rather than falling back.
+**Next up — an evaluation harness:** a golden question set with retrieval hit-rate@k / MRR, groundedness, and refusal accuracy. It exists to settle the numbers currently chosen by judgement (`k`, chunk size, chunk overlap). Temperature 0 and the fixed refusal string are what make those metrics measurable in the first place.
 
-Two details in there are the whole difference between a limiter that works and one that only reports:
-
-- **`trust proxy` is a hop count (`1`), never `true`.** Unset, `req.ip` is the platform's edge and the entire internet shares one bucket. Set to `true`, Express trusts the whole `X-Forwarded-For` chain — and since anyone can send that header, an attacker mints a fresh unlimited bucket per request.
-- **Every limiter gets its own Redis key prefix.** `rate-limit-redis` defaults them all to `rl:`, and the 1-minute and 1-day query limiters both key on the user id — so by default both increment the *same* key with different expiries and the burst window silently resets the daily budget. Nothing errors; the limits just look flaky. The prefix name is a required field for exactly that reason.
-
-**PDF upload:** `POST /documents/upload` takes a multipart PDF, extracts text per page with pdf.js, and chunks **each page independently** — so a citation reads "page 7" rather than "chunk 12", which is the difference between a claim a reader can check and one they can't. The file type is settled by the leading `%PDF-` bytes, not by the client-supplied content type, which is a header anyone can forge. Dedupe hashes the *extracted text* rather than the file bytes, because re-exporting a document changes its bytes but not its meaning. The tradeoff is written into the code: page-aware chunking makes the page boundary a hard chunk boundary, so a PDF of many short pages produces many small chunks — left as-is until the eval harness can measure whether it matters.
-
-**Deliberately deferred:** OCR for scanned PDFs (they're detected and rejected with a specific error), refresh-token rotation, per-user *dollar* metering (rate limits bound requests, not spend), query persistence, reranking / hybrid search / query rewriting (deferred until evals can prove they help), and LangGraph.
-
-**Not there yet:** no automated test suite. Verification so far is runtime scripts and end-to-end probes; `createApp()` is already factored for supertest.
-
-For the design documents proper: [HLD](docs/hld.md) covers topology, capacity, failure modes, and the scaling ladder; [LLD](docs/lld.md) covers the data model, state machines, sequence diagrams, API contracts, and concurrency semantics; [deployment.md](docs/deployment.md) is the record of what going live actually broke and how each piece was verified. Both mark **built** vs **degraded** vs **designed-not-built** explicitly — including the write path's known gaps.
+**Deliberately deferred:** OCR for scanned PDFs (they're detected and rejected with a specific error), refresh-token rotation, per-user dollar metering, query persistence, and reranking / hybrid search / query rewriting — all held until evals can prove they help. There's no automated test suite yet either; verification so far is runtime scripts and end-to-end probes, with `createApp()` already factored for supertest.
