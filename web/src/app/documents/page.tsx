@@ -103,8 +103,11 @@ export default function DocumentsPage() {
   const readyCount = documents.filter((d) => d.status === "READY").length;
 
   return (
-    <div className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6">
+    // `animate-rise` matches /ask and /me: every route in the app enters the
+    // same way, so navigation reads as one product rather than three pages.
+    <div className="mx-auto w-full max-w-2xl flex-1 animate-rise px-4 py-10 sm:px-6">
       <PageHeader
+        back={{ href: "/", label: "Home" }}
         title="Documents"
         description="Paste text or upload a PDF to chunk and embed it for retrieval."
         actions={

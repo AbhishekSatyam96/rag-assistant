@@ -19,8 +19,14 @@ export default function MePage() {
   if (status !== "authenticated" || !user) return <PageLoading />;
 
   return (
-    <div className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6">
+    <div className="mx-auto w-full max-w-2xl flex-1 animate-rise px-4 py-10 sm:px-6">
       <PageHeader
+        // The only page that earns a back link: it's a leaf reached from the
+        // user menu, and unlike Ask and Documents it isn't in the header nav —
+        // so without this the way out is a dropdown you have to remember to
+        // open. Ask is the hardcoded destination because it's where the work
+        // happens, not because it's where you came from.
+        back={{ href: "/ask", label: "Ask" }}
         title="Account"
         description="Everything the API knows about you, straight from the validated token."
       />

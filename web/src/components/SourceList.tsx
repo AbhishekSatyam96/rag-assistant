@@ -60,6 +60,11 @@ function SourceCard({ source, focused }: { source: Source; focused: boolean }) {
       // `id` is what the citation chip scrolls to — see the page's
       // onCitationClick. Derived from `n` so the two sides agree by construction.
       id={`source-${source.n}`}
+      // Focusable programmatically, but skipped by Tab. -1 rather than 0
+      // because this card is not a control: putting every source in the tab
+      // order would make getting past the citations panel a five-key journey,
+      // while still allowing the citation handler to send focus here directly.
+      tabIndex={-1}
       // `scroll-mt` keeps the card clear of the sticky header when it's scrolled
       // into view. Without it, clicking a citation lands the card's top edge
       // underneath the header — the one thing you were trying to read.

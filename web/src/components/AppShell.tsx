@@ -6,10 +6,14 @@ import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/cn";
 import { useAuth } from "@/lib/auth-context";
 import { useTheme, type Theme } from "@/lib/theme";
+import { LINKS } from "@/lib/site";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
+import { SiteFooter } from "@/components/SiteFooter";
 import {
+  IconArrowLeft,
   IconChevronDown,
+  IconExternal,
   IconFile,
   IconLogout,
   IconMonitor,
@@ -24,6 +28,15 @@ import {
 // Documents, /documents linked to Ask *and* Account, /me linked to neither —
 // which is the normal fate of copy-pasted navigation. Now adding a route means
 // editing NAV below, and every page gets it.
+//
+// The logo links to "/" unconditionally. It used to point at /ask once you were
+// signed in, which meant the landing page became unreachable the moment you
+// logged in — no link anywhere in the app went back to it. On a portfolio piece
+// that page IS the pitch, so a visitor who signs up and then wants to re-read
+// how it works had no route there short of editing the URL. Sending a signed-in
+// user to marketing isn't a real cost either: HeroActions swaps its CTAs to
+// "Open the assistant" / "Your documents" when authed, so the landing page acts
+// as a launcher rather than a dead end.
 
 const NAV = [
   { href: "/ask", label: "Ask", icon: <IconSearch className="size-4" /> },
@@ -44,13 +57,18 @@ export function AppShell({ children }: { children: ReactNode }) {
       >
         <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-2 px-4 sm:px-6">
           <Link
-            href={authed ? "/ask" : "/"}
+            href="/"
             className="flex items-center gap-2 rounded-md pr-2 text-[15px] font-semibold tracking-tight"
           >
             <span className="flex size-7 items-center justify-center rounded-lg bg-accent text-on-accent shadow-sm">
               <IconSpark className="size-4" />
             </span>
-            <span className="hidden sm:inline">RAG Assistant</span>
+            {/* `sr-only`, not `hidden`. Below `sm` this link is icon-only, and
+                `hidden` removes the label from the accessibility tree as well
+                as the layout — leaving a link a screen reader announces as
+                just "link". `sr-only` clips it visually while keeping it
+                readable, and `not-sr-only` restores it at `sm`. */}
+            <span className="sr-only sm:not-sr-only">RAG Assistant</span>
           </Link>
 
           {authed && (
@@ -65,9 +83,24 @@ export function AppShell({ children }: { children: ReactNode }) {
 
           <div className="ml-auto flex items-center gap-2">
             {authed ? (
+              // Signed in, the portfolio link lives in the user menu instead —
+              // the nav pills and the account button already fill this row, and
+              // a fourth item is what turns a header into a toolbar.
               <UserMenu />
             ) : (
               <>
+                {/* Hidden below `sm`: on a phone this row is Sign in + Get
+                    started and nothing else fits. The footer carries the same
+                    link at every width, so nothing is actually lost. */}
+                <a
+                  href={LINKS.portfolio}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hidden h-8 items-center gap-1.5 rounded-lg px-2.5 text-[13px] font-medium text-muted transition-colors duration-150 hover:bg-raised hover:text-fg sm:inline-flex"
+                >
+                  Portfolio
+                  <IconExternal className="size-3.5 text-faint" />
+                </a>
                 <ThemeToggleButton />
                 <ButtonLink href="/login" variant="ghost" size="sm">
                   Sign in
@@ -82,6 +115,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       </header>
 
       <main className="flex flex-1 flex-col">{children}</main>
+
+      <SiteFooter />
     </div>
   );
 }
@@ -277,15 +312,36 @@ function UserMenu() {
 
 function MenuItem({
   href,
+  external,
   onSelect,
   children,
 }: {
   href?: string;
+  /** Renders a plain <a target="_blank"> instead of a Link. */
+  external?: boolean;
   onSelect: () => void;
   children: ReactNode;
 }) {
   const className =
     "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-fg transition-colors duration-150 hover:bg-raised";
+
+  // A plain anchor rather than next/link: Link's prefetching and client-side
+  // routing are meaningless for a different origin, and it would try to
+  // intercept the click before the browser could hand it to a new tab.
+  if (href && external) {
+    return (
+      <a
+        role="menuitem"
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        onClick={onSelect}
+        className={className}
+      >
+        {children}
+      </a>
+    );
+  }
 
   if (href) {
     return (
@@ -308,20 +364,45 @@ export function PageHeader({
   title,
   description,
   actions,
+  back,
 }: {
   title: string;
   description?: string;
   actions?: ReactNode;
+  // One object rather than `backHref` + `backLabel`, so "an href with no label"
+  // is unrepresentable instead of merely discouraged.
+  //
+  // `href` is required and there is deliberately no router.back() variant. A
+  // history-based back button does something different depending on how you
+  // arrived — from in-app nav it goes where you expect, from a pasted URL or a
+  // search result it leaves the app entirely. An explicit destination behaves
+  // identically in all three cases, which is the whole point of the control.
+  back?: { href: string; label: string };
 }) {
   return (
-    <div className="mb-8 flex items-start justify-between gap-4">
-      <div className="min-w-0">
-        <h1 className="text-[26px] font-semibold tracking-[-0.02em] text-fg">{title}</h1>
-        {description && (
-          <p className="mt-1.5 text-sm text-muted text-pretty">{description}</p>
-        )}
+    <div className="mb-8">
+      {back && (
+        <Link
+          href={back.href}
+          // `-ml-1` cancels the horizontal padding so the arrow's optical left
+          // edge lines up with the h1 below it rather than sitting a few pixels
+          // inside it — the padding is only there to give the hover state room.
+          className="mb-2 -ml-1 inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-[13px] text-muted transition-colors duration-150 hover:text-fg"
+        >
+          <IconArrowLeft className="size-3.5" />
+          {back.label}
+        </Link>
+      )}
+
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-[26px] font-semibold tracking-[-0.02em] text-fg">{title}</h1>
+          {description && (
+            <p className="mt-1.5 text-sm text-muted text-pretty">{description}</p>
+          )}
+        </div>
+        {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
       </div>
-      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
     </div>
   );
 }

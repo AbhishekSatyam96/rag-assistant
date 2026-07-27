@@ -177,3 +177,65 @@ export function IconExpand(props: IconProps) {
     </Icon>
   );
 }
+
+// The mirror of IconArrowRight, as its own export rather than
+// `<IconArrowRight className="rotate-180" />`. The rotation trick works, but it
+// reads as a hack at every call site and quietly breaks the moment an icon
+// isn't symmetrical about its centre.
+export function IconArrowLeft(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M20 12H4m0 0 6-6m-6 6 6 6" />
+    </Icon>
+  );
+}
+
+export function IconArrowUp(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 20V4m0 0-6 6m6-6 6 6" />
+    </Icon>
+  );
+}
+
+// The box-with-an-arrow that means "this leaves the site". Paired with
+// target="_blank" everywhere it appears — an external link that looks identical
+// to an internal one is a small betrayal of the user's expectations.
+export function IconExternal(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M14 4h6v6M20 4l-8 8" />
+      <path d="M18 13.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4.5" />
+    </Icon>
+  );
+}
+
+export function IconMail(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="5" width="18" height="14" rx="2.5" />
+      <path d="m4.5 8 6.4 4.6a2 2 0 0 0 2.2 0L19.5 8" />
+    </Icon>
+  );
+}
+
+// The two brand marks below break the stroke convention the rest of this file
+// follows: a logo is a fixed shape, not a drawing on a 24-grid, and stroking
+// its outline would render something that is recognisably *not* the logo.
+// `fill`/`stroke` are passed as props so they land after Icon's own defaults in
+// the spread and win — the caller still only ever passes a className.
+export function IconLinkedIn(props: IconProps) {
+  return (
+    <Icon fill="currentColor" stroke="none" {...props}>
+      <path d="M6.94 5a1.94 1.94 0 1 1-3.88 0 1.94 1.94 0 0 1 3.88 0ZM3.25 8.5h3.5V21h-3.5V8.5Zm6 0h3.35v1.71h.05c.47-.89 1.6-1.83 3.3-1.83 3.53 0 4.18 2.32 4.18 5.34V21h-3.5v-5.58c0-1.33-.02-3.04-1.85-3.04-1.86 0-2.14 1.45-2.14 2.95V21h-3.5V8.5Z" />
+    </Icon>
+  );
+}
+
+export function IconGitHub(props: IconProps) {
+  return (
+    <Icon fill="currentColor" stroke="none" {...props}>
+      <path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.5 2.87 8.32 6.84 9.67.5.09.68-.22.68-.49 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.28 2.75 1.05a9.3 9.3 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.81-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.59.69.49A10.03 10.03 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z" />
+    </Icon>
+  );
+}
