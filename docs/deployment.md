@@ -40,9 +40,52 @@ Both are still cross-origin, so CORS and `WEB_ORIGIN` stay exactly as they are.
 
 ---
 
-## Phase 1 — make it start
+## Phase 1 — make it start ✅ DONE 2026-07-27
 
 Goal: a URL that answers `/health`. Nothing else.
+
+**Verified live** at `https://rag-assistant-api.vercel.app`:
+
+```
+/health          {"status":"ok","users":6}                        200
+/me (no token)   {"error":"Missing or malformed Authorization…"}   401
+CORS preflight   204 + allow-origin: https://rag.abhisheksatyam.com
+x-vercel-id      bom1::sin1::…        <- function really runs in Singapore
+```
+
+The `/me` 401 matters more than the 200: it proves the auth middleware, the
+error middleware and Express routing are all live, not merely that a health
+check responds.
+
+### What it actually took — nine builds, nine distinct layers
+
+Kept because the failures were each in a different subsystem, and every one of
+them is a thing that only shows up on a platform and never locally:
+
+| # | Symptom | Cause |
+| --- | --- | --- |
+| 1 | `EBADDEVENGINES` | Vercel couldn't parse the lockfile → fell back to npm → `devEngines` said "not npm" |
+| 2–4 | `ERR_INVALID_THIS`, `ERR_PNPM_BROKEN_LOCKFILE` | `devEngines.onFail: "download"` makes pnpm write a **two-document** lockfile: 198 lines of pnpm installing itself, then the real one. Every reader that parses one document sees a lockfile with no dependencies. Also: `npm i -g pnpm` loses to the container's own pnpm on `PATH` (proved by echoing `pnpm --version` → `6.35.1`); `npx --yes pnpm@11.17.0` doesn't consult `PATH` |
+| 5 | `No entrypoint found which imports express` | The entrypoint must **literally** `import express` — the detector doesn't follow the import graph — *and* default-export the app instance. Both halves, one file |
+| 6 | `Cannot read properties of undefined (reading 'readFile')` | Vercel's builder drives the classic TS compiler API (`ts.sys`); TypeScript 7 is the native rewrite and doesn't expose it |
+| 7 | `TS2307` on the generated Prisma client | `src/generated/prisma` is gitignored and nothing generated it |
+| 8 | `ERR_MODULE_NOT_FOUND: './lib/prisma'` at **runtime**, build green | `"type": "module"` + `moduleResolution: "Bundler"` emits extensionless specifiers verbatim. Node ESM requires extensions. `tsx` resolves like a bundler, so dev, `tsc` and the editor all agree on code Node refuses to load |
+| 9 | `TS2307` again, after it had been fixed | Vercel restored `node_modules` from cache → pnpm did nothing → **pnpm skips lifecycle scripts when it does nothing** → `postinstall` never ran |
+
+**The one check that would have caught #8 before any of this:** compile and run
+the output with plain Node.
+
+```bash
+rm -rf dist && pnpm exec tsc && PORT=4123 node dist/index.js
+```
+
+`tsx` and `tsc --noEmit` share a resolver with bundlers, not with Node. This is
+the only local command that shares a module resolver with production. Run it
+before every deploy.
+
+**Two settings that look cosmetic and are not**, both commented where they live:
+`importFileExtension = "js"` in `schema.prisma`, and every relative import in
+`src/` ending in `.js`.
 
 ### 1.1 Entrypoint — the file Vercel finds first is the wrong one
 
