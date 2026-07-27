@@ -4,6 +4,8 @@ Upload your documents, ask questions about them, get **streamed answers grounded
 
 Built as a proof-piece: a real Express backend (deliberately *not* Next.js API routes), Postgres + pgvector for retrieval, and a Next.js frontend that streams tokens as they're generated.
 
+**Live:** [rag.abhisheksatyam.com](https://rag.abhisheksatyam.com) → [api.abhisheksatyam.com](https://api.abhisheksatyam.com) — two Vercel projects from this one repo. See [docs/deployment.md](docs/deployment.md) for what that cost in design terms.
+
 ```
 ┌──────────────┐        ┌───────────────────────┐        ┌──────────────────┐
 │  Next.js 16  │  JSON  │      Express 5        │        │  Neon Postgres   │
@@ -18,7 +20,7 @@ Built as a proof-piece: a real Express backend (deliberately *not* Next.js API r
 
 **Design docs:** [HLD](docs/hld.md) — topology, capacity, failure modes, scaling ladder ·
 [LLD](docs/lld.md) — data model, state machines, sequence diagrams, API contracts ·
-[STATUS.md](STATUS.md) — chronological decision log and milestone state.
+[Deployment](docs/deployment.md) — what shipping to Vercel cost architecturally, and what it fixed.
 
 ---
 
@@ -110,7 +112,7 @@ User ──< Document ──< Chunk
 
 ## Running it locally
 
-**Prerequisites:** Node 20+, pnpm, a Postgres database with the `vector` extension available (Neon works out of the box), and an OpenAI API key.
+**Prerequisites:** Node 20+, pnpm, a Postgres database with the `vector` extension available (Neon works out of the box), and an OpenAI API key. Redis is optional for local development and required in production — see `REDIS_URL` below.
 
 ### 1. API
 
@@ -132,9 +134,12 @@ PORT=4000
 NODE_ENV=development
 WEB_ORIGIN="http://localhost:3000"
 SIGNUP_INVITE_CODE="…"                          # unset = signup open to anyone
+REDIS_URL="redis://localhost:6379"              # optional here, REQUIRED in production
 ```
 
 `SIGNUP_INVITE_CODE` is the emergency brake: set it and `POST /auth/signup` requires a matching `inviteCode`, closing the door without a code change. Set `NEXT_PUBLIC_SIGNUP_INVITE_REQUIRED=true` on the web app at the same time so the signup form shows the field.
+
+`REDIS_URL` is where the rate limiters keep their counters. Leave it unset locally and they fall back to an in-memory store, so a clone runs with nothing but Postgres. **With `NODE_ENV=production` the process refuses to start without it** — a fallback there would give every instance its own counters, making the effective limit `limit × instances` and the "global" daily cap per-instance. That failure reports correctly in every `RateLimit` header and enforces nothing, so it is deliberately fatal rather than silent.
 
 Env is validated by zod at boot, so a missing or malformed var fails immediately with a named error rather than deep inside a request.
 
@@ -174,7 +179,7 @@ The HNSW index sits on an `Unsupported()` column, so Prisma Migrate can't repres
 
 ## Decisions worth defending
 
-A selection — the full list with rationale lives in [STATUS.md](STATUS.md).
+A selection. Each one is also written into the code it governs, next to the thing it explains — the [HLD](docs/hld.md) and [LLD](docs/lld.md) carry the system- and module-level versions.
 
 - **`vector_cosine_ops` in the index, `<=>` in the query.** The operator class and the operator must agree. Verified with `enable_seqscan = off`: `<=>` plans as an index scan, `<->` (L2) still plans as `Seq Scan + Sort`. A mismatch never errors — it silently stops using the index, so the symptom is "slow but correct", which survives all the way to production.
 - **HNSW, not IVFFlat.** IVFFlat learns cluster centroids from existing data, so building it on a near-empty table produces a permanently bad index. HNSW builds incrementally — the only option for a table that grows one upload at a time.
@@ -220,18 +225,21 @@ Backend layering is **routes → service → lib**: routes validate input and pi
 
 ## Status & roadmap
 
-**Working today:** auth (backend + frontend), document ingestion, the `/documents` dashboard, vector retrieval, and streamed grounded answers with citations at `/ask`.
+**Working today:** auth (backend + frontend), document ingestion, the `/documents` dashboard, vector retrieval, and streamed grounded answers with citations at `/ask` — deployed and verified end to end in production, including that streaming really streams and that an off-corpus question still refuses.
 
 **Next — evaluation harness:** a golden question set, retrieval hit-rate@k / MRR, groundedness and refusal accuracy. It exists to settle the numbers currently chosen by judgement (`k = 5`, `chunkSize 1000`, `chunkOverlap 200`). `temperature: 0` and the fixed refusal string are what make those metrics measurable.
 
-**Abuse & cost controls:** the app spends real money on behalf of anyone who signs up, so `/queries` carries a burst limit (10/min), a per-user daily budget (50/day), a global daily ceiling, and a cap of 2 concurrent streams — because a rate limit bounds requests per window, not simultaneous in-flight generations. `/auth/*` and document ingestion are limited too, and `SIGNUP_INVITE_CODE` closes signup entirely as a one-config-change lever. See [STATUS.md](STATUS.md) for the reasoning, including why `trust proxy` is a hop count rather than `true`.
+**Abuse & cost controls:** the app spends real money on behalf of anyone who signs up, so `/queries` carries a burst limit (10/min), a per-user daily budget (50/day), a global daily ceiling, and a cap of 2 concurrent streams — because a rate limit bounds requests per window, not simultaneous in-flight generations. `/auth/*` and document ingestion are limited too, and `SIGNUP_INVITE_CODE` closes signup entirely as a one-config-change lever. The counters live in **Redis**, because the deploy target autoscales and a per-process store would make the effective limit `limit × instances` — so `REDIS_URL` is required at boot in production rather than falling back.
+
+Two details in there are the whole difference between a limiter that works and one that only reports:
+
+- **`trust proxy` is a hop count (`1`), never `true`.** Unset, `req.ip` is the platform's edge and the entire internet shares one bucket. Set to `true`, Express trusts the whole `X-Forwarded-For` chain — and since anyone can send that header, an attacker mints a fresh unlimited bucket per request.
+- **Every limiter gets its own Redis key prefix.** `rate-limit-redis` defaults them all to `rl:`, and the 1-minute and 1-day query limiters both key on the user id — so by default both increment the *same* key with different expiries and the burst window silently resets the daily budget. Nothing errors; the limits just look flaky. The prefix name is a required field for exactly that reason.
 
 **PDF upload:** `POST /documents/upload` takes a multipart PDF, extracts text per page with pdf.js, and chunks **each page independently** — so a citation reads "page 7" rather than "chunk 12", which is the difference between a claim a reader can check and one they can't. The file type is settled by the leading `%PDF-` bytes, not by the client-supplied content type, which is a header anyone can forge. Dedupe hashes the *extracted text* rather than the file bytes, because re-exporting a document changes its bytes but not its meaning. The tradeoff is written into the code: page-aware chunking makes the page boundary a hard chunk boundary, so a PDF of many short pages produces many small chunks — left as-is until the eval harness can measure whether it matters.
 
-**Deliberately deferred:** OCR for scanned PDFs (they're detected and rejected with a specific error), refresh-token rotation, per-user *dollar* metering (rate limits bound requests, not spend), query persistence, reranking / hybrid search / query rewriting (deferred until evals can prove they help), LangGraph, and deployment to Cloud Run + Vercel.
+**Deliberately deferred:** OCR for scanned PDFs (they're detected and rejected with a specific error), refresh-token rotation, per-user *dollar* metering (rate limits bound requests, not spend), query persistence, reranking / hybrid search / query rewriting (deferred until evals can prove they help), and LangGraph.
 
 **Not there yet:** no automated test suite. Verification so far is runtime scripts and end-to-end probes; `createApp()` is already factored for supertest.
 
-See [STATUS.md](STATUS.md) for the full milestone log, every decision with its rationale, and verified SQL for inspecting documents, chunks, and embeddings.
-
-For the design documents proper: [HLD](docs/hld.md) covers topology, capacity, failure modes, and the scaling ladder; [LLD](docs/lld.md) covers the data model, state machines, sequence diagrams, API contracts, and concurrency semantics. Both mark **built** vs **degraded** vs **designed-not-built** explicitly — including the write path's known gaps.
+For the design documents proper: [HLD](docs/hld.md) covers topology, capacity, failure modes, and the scaling ladder; [LLD](docs/lld.md) covers the data model, state machines, sequence diagrams, API contracts, and concurrency semantics; [deployment.md](docs/deployment.md) is the record of what going live actually broke and how each piece was verified. Both mark **built** vs **degraded** vs **designed-not-built** explicitly — including the write path's known gaps.

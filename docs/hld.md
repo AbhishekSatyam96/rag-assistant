@@ -2,7 +2,7 @@
 
 **Scope:** system topology, data flow, capacity, failure behaviour, and the scaling ladder.
 For module internals, schemas, sequence diagrams, and API contracts, see [LLD](lld.md).
-For the chronological decision log, see [STATUS.md](../STATUS.md).
+For how this survived contact with a real deployment, see [deployment.md](deployment.md).
 
 **Status legend used throughout:** ✅ built and verified · 🟡 built but degraded/incomplete · ⬜ designed, not built
 
@@ -101,7 +101,7 @@ flowchart TB
     subgraph vercel["Vercel"]
         Web["web<br/>Next.js"]
     end
-    subgraph cloudrun["Cloud Run"]
+    subgraph compute["Container platform (target — see note)"]
         Api["api service<br/>scales to zero<br/>auth · documents · queries"]
         Worker["worker service<br/>min-instances = 1<br/>CPU always allocated"]
     end
@@ -120,13 +120,24 @@ flowchart TB
     Api -->|"embed question<br/>+ generate"| OAI
 ```
 
-**Why a worker is a separate Cloud Run service, not a thread in `api`:** Cloud Run throttles CPU to
-near zero outside an active request unless CPU-always-allocated is set. A queue consumer running
-inside the API container would stall mid-job whenever traffic went quiet — jobs would appear to hang
-for no reason, intermittently, and only in production. The worker therefore needs
-`min-instances = 1` and always-on CPU, which means **it does not scale to zero and costs money at
-idle.** That cost is the real price of the async write path, and it is the honest answer to "why
+> **This diagram is the target, not the deployment.** As of 2026-07-27 both apps run on **Vercel**
+> — `web` as a static Next.js build and `api` as a single function in `sin1` — and the worker does
+> not exist yet (ingestion is still synchronous, §4.2). Redis joins the picture as the rate limiters'
+> store, because a function platform scales instances and per-process counters stop meaning anything.
+> See [`deployment.md`](deployment.md) for why Cloud Run was dropped and what it cost architecturally.
+
+**Why a worker is a separate service, not a thread in `api`:** a container platform like Cloud Run
+throttles CPU to near zero outside an active request unless CPU-always-allocated is set. A queue
+consumer running inside the API container would stall mid-job whenever traffic went quiet — jobs
+would appear to hang for no reason, intermittently, and only in production. The worker therefore
+needs `min-instances = 1` and always-on CPU, which means **it does not scale to zero and costs money
+at idle.** That cost is the real price of the async write path, and it is the honest answer to "why
 split the services?"
+
+**On the current function deployment the problem is sharper, not softer:** work started outside a
+request doesn't merely get throttled, it is killed when the invocation returns. So M8 needs an
+external queue or cron service rather than a second container — a door the Vercel deploy closed
+knowingly.
 
 **Why pg-boss on the existing Postgres, not Redis/BullMQ:** no second datastore, no second
 connection string, and — critically — jobs and the rows they produce commit to the same database.
@@ -165,8 +176,9 @@ without its *behaviour*.
 Three concrete consequences, all currently unhandled:
 
 1. **Long documents hit the platform timeout.** A 200,000-character document produces ~250 chunks
-   and 3 batched embedding calls. On Cloud Run's 300s request ceiling this is survivable today but
-   has no headroom, and the failure is a killed request with the row left mid-flight.
+   and 3 batched embedding calls. Against a platform request ceiling in the low hundreds of seconds
+   this is survivable today but has no headroom, and the failure is a killed request with the row
+   left mid-flight.
 2. **No retry on a transient OpenAI failure.** A single 429 while embedding fails the entire
    document. `status` becomes `FAILED` and the only recovery is the user re-uploading — which the
    `contentHash` dedupe check will then *reject as a duplicate*, because a `FAILED` row still
@@ -433,8 +445,8 @@ The two 🟡 rows in the write path share one root cause and one fix.
 
 ## 10. Design decisions at HLD level
 
-Decisions that shape the *system*. Module-level decisions live in the [LLD](lld.md); the full
-chronological log with rationale is in [STATUS.md](../STATUS.md).
+Decisions that shape the *system*. Module-level decisions live in the [LLD](lld.md); each decision
+is also written into the code it governs, next to the thing it explains.
 
 | Decision | Alternative rejected | Why |
 |---|---|---|
@@ -443,7 +455,7 @@ chronological log with rationale is in [STATUS.md](../STATUS.md).
 | NDJSON, not SSE | Server-Sent Events | `EventSource` cannot set headers. SSE would force the Bearer token into a query string — server logs, browser history, `Referer`. A constraint, not a preference. |
 | Streaming read path, queued write path | Uniform treatment of both | They are slow for different reasons and have different waiters (§4) |
 | pg-boss on the existing DB | BullMQ + Redis | No second datastore; jobs commit with the rows they produce |
-| Separate worker service | Worker thread inside `api` | Cloud Run throttles CPU outside requests (§3.2) |
+| Separate worker service | Worker thread inside `api` | Compute platforms throttle or kill work started outside a request (§3.2) |
 | Embedding model hardcoded, chat model in env | Both configurable | Changing the embedding model invalidates every stored vector |
 | PDF parsed at the edge; pipeline stays text-only | Teach ingestion about file formats | One conversion point. `ingestDocument` never learns that PDFs exist, so every future format is a new parser rather than a new branch in the pipeline. |
 | Separate `POST /documents/upload` | One route sniffing its own `Content-Type` | Two body parsers, two validation schemas, two error taxonomies. Branching on a header inside one handler couples failure modes that have nothing to do with each other; the JSON route stays byte-for-byte unchanged. |
@@ -465,8 +477,16 @@ chronological log with rationale is in [STATUS.md](../STATUS.md).
 | PDF upload | Multipart route · pdf.js extraction · page-aware chunking · page-level citations | ✅ |
 | **M7 — evals** | Golden question set · hit-rate@k / MRR · groundedness · refusal accuracy · **per-page vs. whole-document chunking** | ➡️ **next** |
 | M8 — async write path | pg-boss · worker service · retry · `202 Accepted` · reprocess job | ⬜ |
-| M9 — deployment | Cloud Run × 2 · Vercel · CI | ⬜ |
-| Hardening | Refresh tokens · rate limiting · helmet · httpOnly cookies · automated tests | ⬜ |
+| M9 — deployment | **Vercel × 2** (web + API as a function), custom subdomains, Redis-backed limits | ✅ **2026-07-27** |
+| Hardening | ~~Rate limiting~~ ✅ (Redis-backed) · refresh tokens · helmet · httpOnly cookies · automated tests | 🟡 partial |
+
+**M9 landed before M7, and not on the planned infrastructure.** Cloud Run was dropped rather than
+postponed: its always-free tier covers US regions only while the database sits in `ap-southeast-1`,
+so every retrieval round trip would pay a trans-Pacific cost or the tier would be abandoned.
+Deploying to functions instead invalidated the single-instance assumption the cost controls were
+designed around, which is what moved the rate limiters onto Redis (`REDIS_URL` is now required at
+boot in production). The concurrency guard stayed in-memory deliberately — see
+[`concepts.md` §1.11](concepts.md#111-rate-limiting-and-concurrency--two-different-problems).
 
 **PDF upload added a fourth number for M7 to settle, and a structural one.** Chunking each page
 independently makes the page boundary a *hard* chunk boundary: `chunkOverlap` cannot bridge a

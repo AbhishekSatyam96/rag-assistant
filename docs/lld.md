@@ -3,8 +3,8 @@
 **Scope:** module structure, data model, state machines, sequence diagrams, API contracts,
 algorithms and their parameters, error taxonomy, and concurrency semantics.
 
-For topology, capacity, and scaling, see [HLD](hld.md). For the chronological decision log, see
-[STATUS.md](../STATUS.md).
+For topology, capacity, and scaling, see [HLD](hld.md). For what deploying this to a function
+platform changed, see [deployment.md](deployment.md).
 
 **Status legend:** ✅ built and verified · 🟡 built but degraded/incomplete · ⬜ designed, not built
 
@@ -614,6 +614,7 @@ Real ones, from the code — not a list assembled to look longer.
 | Answers are discarded | Medium — blocks history, caching, scoring | `Query` table |
 | Token in `localStorage` 🟡 | Medium — XSS-readable | httpOnly cookies (forces the stream off Bearer) |
 | No refresh token, 1h expiry 🟡 | Medium | Refresh + rotation |
-| No rate limiting, no helmet | Medium | Deferred hardening |
+| No `helmet` | Medium — rate limiting is done (Redis-backed, `middleware/rate-limit.ts`); security headers are not | Deferred hardening |
+| Concurrency cap is per-instance | Low — the limiters moved to Redis, the `Map` deliberately did not, so "2 streams per user" reads as "2 per instance" behind an autoscaler | Nothing: it counts sockets this process owns, and the per-user cost bound now belongs to the Redis limiters |
 | `listDocuments` unpaginated | Low — signature already takes an object | Cursor pagination |
 | Answers rendered as preformatted text | Low — model emits markdown | Render + sanitise (text derives from user documents) |

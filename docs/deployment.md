@@ -1,4 +1,9 @@
-# Deployment plan — both apps on Vercel
+# Deployment — both apps on Vercel
+
+**Status: live since 2026-07-27.** [rag.abhisheksatyam.com](https://rag.abhisheksatyam.com) →
+[api.abhisheksatyam.com](https://api.abhisheksatyam.com). Phases 1–5 are done; Phase 6 is
+housekeeping and partly outstanding. This file started as a plan and is now also the record of
+what the plan got wrong, which is the more useful half.
 
 **Decision:** `web/` and `api/` deploy as two Vercel projects from this one repo, on the
 Hobby plan, at $0/month.
@@ -22,7 +27,8 @@ already there, deploys ride the existing `git push`, preview deployments for the
 Fluid compute's cold-start prevention means no 45-second first impression.
 
 **What it costs us:** the single-instance guarantee the cost controls were designed around.
-Phase 4 is where we buy it back.
+Phase 4 bought it back, with Redis — and `REDIS_URL` is now a boot requirement in production
+precisely so that guarantee can never be lost silently again.
 
 ## The shape
 
@@ -125,9 +131,13 @@ descriptors.
 
 ### 1.4 Environment variables
 
-**api project:** `DATABASE_URL` (pooled), `JWT_SECRET`, `OPENAI_API_KEY`,
+**api project:** `DATABASE_URL` (pooled), `JWT_SECRET`, `OPENAI_API_KEY`, `REDIS_URL`,
 `WEB_ORIGIN=https://rag.abhisheksatyam.com`, `NODE_ENV=production`. Optional: `CHAT_MODEL`,
 `SIGNUP_INVITE_CODE`.
+
+`REDIS_URL` is **not optional here** — with `NODE_ENV=production` the process exits at boot
+without it (§4.1). That is the intended behaviour: the alternative is a deploy that serves
+traffic with per-instance limits and no way to tell.
 
 `PORT` is unused on Vercel — harmless, since `lib/env.ts` defaults it.
 
@@ -149,8 +159,9 @@ There is no release-command hook. Run `prisma migrate deploy` **from your laptop
 production.
 
 Do **not** put it in the build command: preview deployments would then migrate the production
-database on every branch push. Given the HNSW drift situation already documented in STATUS.md,
-manual and deliberate is the correct posture anyway.
+database on every branch push. Given that the HNSW index cannot be represented in `schema.prisma`
+— so `migrate dev` sees drift and generates a `DROP INDEX`, which corrupted migration history once
+already — manual and deliberate is the correct posture anyway.
 
 > **Checkpoint:** `curl https://api.abhisheksatyam.com/health` returns `{"status":"ok"}`.
 > Stop here and confirm before touching anything below.
@@ -206,8 +217,8 @@ correct — it just silently deletes the entire UX the streaming design exists f
 
 ### 2.2 Request cancellation is opt-in — this one costs money
 
-`STATUS.md` says the `res.on("close")` → OpenAI `AbortController` wiring exists because "a
-closed tab otherwise leaves us streaming tokens into a dead socket, billed in full."
+The `res.on("close")` → OpenAI `AbortController` wiring exists because a closed tab otherwise
+leaves the API streaming tokens into a dead socket, billed in full.
 
 **On Vercel that wiring does nothing unless you opt in**, per-path, in `api/vercel.json`:
 
@@ -271,18 +282,25 @@ this turns out to need hardening.
 
 ---
 
-## Phase 4 — restore the cost controls
+## Phase 4 — restore the cost controls ✅ DONE 2026-07-27
 
-This is the phase that matters. Until it's done, signup is open to the internet in front of a
-paid API with limits that report correctly and enforce nothing.
+This is the phase that mattered. Until it was done, signup was open to the internet in front of
+a paid API with limits that reported correctly and enforced nothing.
 
-### 4.1 Rate limiter → Redis
+### 4.1 Rate limiter → Redis ✅
 
-`rate-limit.ts:22-26` already predicted this: *"On a single instance that is exact; behind an
-autoscaler the effective limit is (limit × instance count). The fix is a one-line swap to
-`rate-limit-redis` — not a redesign — because everything below goes through `makeLimiter()`."*
+**Shipped:** `rate-limit-redis` + `ioredis`, a new `lib/redis.ts`, `REDIS_URL` in `lib/env.ts`
+made fatal in production, and a required `name` on every limiter. **No limiter definition
+changed** — the numbers, key generators and `skipSuccessfulRequests` are all untouched, which
+was the whole bet.
 
-The seam holds. The swap is slightly more than one line, for two reasons.
+The prediction in `rate-limit.ts` was right about the seam and wrong about the price:
+*"On a single instance that is exact; behind an autoscaler the effective limit is
+(limit × instance count). The fix is a one-line swap to `rate-limit-redis` — not a redesign —
+because everything below goes through `makeLimiter()`."*
+
+The seam held. The swap was more than one line, for two reasons — both of which are the
+interesting part, and both of which are now written into the code they apply to.
 
 **Which client.** Two candidates:
 
@@ -295,10 +313,21 @@ The seam holds. The swap is slightly more than one line, for two reasons.
   get reimplemented by hand. `skipSuccessfulRequests` in particular is not trivial: it has to
   decrement *after* the response resolves.
 
-**Recommendation: `rate-limit-redis` + `ioredis`.** The usual argument against TCP from
+**Chosen: `rate-limit-redis` + `ioredis`.** The usual argument against TCP from
 serverless is connection churn per invocation, but Fluid compute reuses instances, so it's one
 connection per instance amortised across many requests — one file descriptor out of 1,024.
 Preserving three documented design decisions is worth more than the transport purity.
+
+The client is configured to fail *fast*, not to retry: `maxRetriesPerRequest: 2` and
+`enableOfflineQueue: false`, because ioredis otherwise retries forever and an unreachable Redis
+would turn every request into a hang. A rate limiter must not become an availability risk for
+the thing it protects. Its `error` listener exists for a blunter reason — ioredis emits `error`
+on an EventEmitter, and an unhandled one takes the process down.
+
+**A third thing the plan missed:** `REDIS_URL` had to be made *fatal* in production rather than
+falling back to memory. A fallback reintroduces exactly the failure this phase exists to remove,
+minus any way to notice it. A process that won't start is a page of logs; a limiter that quietly
+stopped limiting is a bill. Development stays optional, so a clone still runs on Postgres alone.
 
 **The trap: every limiter needs its own key prefix.** `queryBurstLimiter` (1 min) and
 `queryDailyLimiter` (1 day) both key on `req.user.id`. `rate-limit-redis` defaults to the
@@ -306,12 +335,22 @@ prefix `rl:` for every store, so both would `INCR` the identical Redis key with 
 expiries. The daily budget and the burst window would corrupt each other — and it would look
 like the limits "sometimes work."
 
-So `makeLimiter()` grows a required `name`, used as the store prefix. That's the actual change:
+So `makeLimiter()` grew a required `name`, used as the store prefix. That was the actual change:
 one new field on `LimiterConfig`, one `store:` line, six call sites passing a name. Still one
 seam, exactly as predicted.
 
+`name` is **required**, not optional-with-a-default, and that is the deliberate part: two
+limiters sharing a prefix while sharing a key generator corrupt each other silently, so the type
+checker is the only mechanism that makes it impossible to forget. It flagged all six call sites
+the moment the field was added, which is precisely the behaviour wanted. Changing a `name` later
+resets that limiter's counters, which is harmless.
+
 Upstash has a free tier and a Vercel marketplace integration. Each check is 1–2 Redis commands;
 at demo scale it will not approach the free limit.
+
+**Verified both directions:** development with no `REDIS_URL` boots on the memory store and
+serves `/health`; production with no `REDIS_URL` refuses to start, naming the variable and the
+consequence.
 
 ### 4.2 The concurrency guard — leave it alone
 
@@ -330,8 +369,15 @@ What *doesn't* survive is the cross-instance reading of it — "a user may hold 
 becomes "2 per instance." That's the per-user **cost** bound, and Phase 4.1 is what re-establishes
 it. Two different jobs that the single-instance deployment happened to let one `Map` do at once.
 
-So: keep the code, amend the comment to separate the two claims. That's a better STATUS.md entry
-than a Redis migration would have been.
+So: keep the code, amend the comment to separate the two claims. Deciding *not* to migrate, for a
+stated reason, is the more defensible outcome here than migrating would have been.
+
+**Status:** the code was correctly left alone. **The comment amendment is still outstanding** —
+`concurrency.ts:17-18` currently reads *"Deliberately in-memory and per-process, exactly like the
+rate limiter's store"*, and as of the Redis swap that comparison is false. The reasoning around
+it (an open socket is owned by this process; a shared counter would need a lease) is still right
+and is the reason the file didn't change. Rewriting those two lines to say *why* the two stores
+now differ is the last piece of Phase 4.
 
 ---
 
@@ -383,11 +429,16 @@ subdomain target a different project.
 
 ## Phase 6 — housekeeping
 
-- **Stale comments naming Cloud Run:** `app.ts:24`, `app.ts:34`, `rate-limit.ts:127`. They
-  describe reasoning that is still correct and infrastructure that is now wrong.
-- **`document.routes.ts:44-49`** — the "multer's `limits` is the boundary" claim needs the
-  4.5 MB caveat.
-- **STATUS.md** — the deploy line still reads "Dockerize → Cloud Run + Vercel."
+- ⬜ **Stale comments naming Cloud Run:** `app.ts:24`, `app.ts:34`, `rate-limit.ts:171`. They
+  describe reasoning that is still correct and infrastructure that is now wrong. (Line number
+  updated after the Redis swap; the `rate-limit.ts` one now sits in the `signupLimiter` note.)
+- ⬜ **`concurrency.ts:17-18`** — "in-memory and per-process, exactly like the rate limiter's
+  store" stopped being true when the limiters moved to Redis. See §4.2.
+- ✅ **`document.routes.ts`** — the "multer's `limits` is the boundary" claim now carries the
+  Vercel-body-limit caveat, and the cap itself moved to `lib/upload.ts` next to the sentence
+  that describes it.
+- ✅ **Roadmap entries** naming Cloud Run as the deploy target — corrected across the README and
+  the HLD, where M9 is now recorded as done on Vercel.
 
 ---
 
@@ -396,9 +447,10 @@ subdomain target a different project.
 Worth writing down so it's a decision and not an oversight:
 
 - **Autoscale cuts both ways.** A container under attack falls over; a function under attack
-  scales to 30,000 concurrency and spends the OpenAI budget. After Phase 4 the only ceilings are
-  the Redis rate limiter and the spend cap on the OpenAI key. There is no natural bound
-  underneath them.
+  scales to 30,000 concurrency and spends the OpenAI budget. Now that Phase 4 has landed, the
+  only ceilings are the Redis rate limiter and the spend cap on the OpenAI key. There is no
+  natural bound underneath them — which is also why `REDIS_URL` is a boot-time requirement
+  rather than a nice-to-have.
 - **Statelessness closes a door on the roadmap.** Moving ingestion to `202 Accepted` + async is
   an in-process worker on a container; on Vercel it needs a queue or cron service.
 - **Harder to debug** — no SSH, no long-lived process, logs are per-invocation.
@@ -406,8 +458,8 @@ Worth writing down so it's a decision and not an oversight:
   is the point. Not broken, just measurably slower.
 - **Hobby is single-region and non-commercial.** If this ever becomes a real product, that's a
   Pro upgrade.
-- **The narrative tension.** STATUS.md opens with "deliberately NOT Next.js API routes, because
-  the goal is to show a real backend." Serverless Express is not that — separate service,
+- **The narrative tension.** The project's premise is "deliberately NOT Next.js API routes, because
+  the goal is to show a real backend." Serverless Express is not quite that — separate service,
   separate domain, separate deploy, real middleware stack — but it is closer to it than a
   container is, and an interviewer may probe it. The honest answer is that being forced onto
   distributed rate limiting is a *more* senior problem than the in-memory version, and
