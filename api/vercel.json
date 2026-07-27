@@ -1,5 +1,4 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "regions": ["sin1"],
-  "installCommand": "npm i -g pnpm@11.17.0 && pnpm --version && pnpm install --frozen-lockfile"
+  "regions": ["sin1"]
 }
