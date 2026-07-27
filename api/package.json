@@ -5,6 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "tsx watch src/index.ts",
     "smoke:ingest": "tsx src/scripts/smoke-ingest.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
