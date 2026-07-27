@@ -1,24 +1,17 @@
-import { createApp } from "./create-app";
+import app from "./app";
 import { env } from "./lib/env";
 
-// THE ENTRYPOINT, and the only file that should be one.
+// LOCAL DEVELOPMENT ONLY. `pnpm dev` runs this file; Vercel never loads it.
 //
-// Vercel discovers the app by filename, checking `app.*`, `index.*`, `server.*`
-// and then the same three under `src/` — first match wins. `src/app.ts` used to
-// exist and would have been found FIRST, and it exported `createApp` (a factory)
-// rather than an app instance, satisfying neither of the two contracts Vercel
-// accepts. Hence the rename to create-app.ts: the ambiguity is removed rather
-// than worked around, and the createApp/listen separation built back in M1
-// survives intact.
-const app = createApp();
-
-// Vercel imports this module and drives the exported app itself — there is no
-// port to bind and no process that outlives a request. Locally there is both,
-// so the listener stays, guarded. `pnpm dev` binds a port; Vercel never does.
-if (!process.env.VERCEL) {
-  app.listen(env.PORT, () => {
-    console.log(`API on http://localhost:${env.PORT}`);
-  });
-}
-
-export default app;
+// Vercel resolves src/app.ts as the entrypoint (it comes before src/index.ts in
+// the detection order) and drives the app it default-exports directly — there
+// is no port to bind and no process that outlives a request. Locally there is
+// both, so the listener lives here, which keeps "build the app" and "start
+// listening" in separate files exactly as they have been since M1.
+//
+// Importing the default export rather than calling createApp() again matters:
+// a second call would construct a second app with its own rate-limiter and
+// concurrency counters, and only one of them would ever see a request.
+app.listen(env.PORT, () => {
+  console.log(`API on http://localhost:${env.PORT}`);
+});

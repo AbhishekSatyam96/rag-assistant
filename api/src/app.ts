@@ -127,3 +127,24 @@ export function createApp() {
 
   return app;
 }
+
+// THE DEPLOYMENT ENTRYPOINT.
+//
+// Vercel finds the Express app by filename, checking app.*, index.*, server.*
+// and then the same three under src/ — first match wins. It then requires that
+// file to satisfy BOTH halves of a contract that is easy to half-satisfy:
+//
+//   1. the file must literally `import express` — the detector does not follow
+//      the import graph, so re-exporting a factory from another module fails
+//      with "No entrypoint found which imports express"
+//   2. the file must default-export the app INSTANCE, not a factory
+//
+// This file is the first match in that search order and already imports
+// express, so it is the entrypoint whether or not that was intended. Hence the
+// default export lives here rather than in index.ts.
+//
+// Constructed once at module load, and index.ts imports THIS instance rather
+// than calling createApp() again — two calls would build two independent sets
+// of rate-limiter and concurrency state, only one of which serves traffic.
+// createApp stays exported for tests that want a throwaway instance.
+export default createApp();
