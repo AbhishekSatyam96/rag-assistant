@@ -19,8 +19,6 @@ import { IconArrowRight, IconLayers, IconSearch, IconSpark, IconStop } from "@/c
 // box, because a second click to confirm is pure friction.
 const EXAMPLES = [
   "Summarise the key points across my documents.",
-  "What decisions were made, and why?",
-  "What does this say about pricing?",
 ];
 
 export default function AskPage() {
