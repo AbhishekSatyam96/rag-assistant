@@ -3,6 +3,10 @@
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { ApiError } from "@/lib/api";
+import { Button } from "@/components/ui/Button";
+import { Field, Input } from "@/components/ui/Field";
+import { Alert } from "@/components/ui/Alert";
+import { IconSpark } from "@/components/icons";
 
 // Login and signup are visually identical; a single form driven by `mode` keeps
 // them in sync. The parent passes `onSubmit` (which calls the auth context and
@@ -37,10 +41,6 @@ function validate(email: string, password: string, inviteCode: string): string |
   return null;
 }
 
-const INPUT_CLASS =
-  "rounded-md border border-black/15 bg-transparent px-3 py-2 text-base outline-none " +
-  "focus:border-black/40 dark:border-white/15 dark:focus:border-white/40";
-
 export function AuthForm({ mode, onSubmit }: AuthFormProps) {
   const isSignup = mode === "signup";
   const [email, setEmail] = useState("");
@@ -72,7 +72,7 @@ export function AuthForm({ mode, onSubmit }: AuthFormProps) {
       // "Email already registered", 401 "Invalid email or password").
       setError(
         err instanceof ApiError
-          ? err.details?.[0]?.message ?? err.message
+          ? (err.details?.[0]?.message ?? err.message)
           : "Something went wrong. Please try again.",
       );
       setSubmitting(false);
@@ -80,71 +80,97 @@ export function AuthForm({ mode, onSubmit }: AuthFormProps) {
   }
 
   return (
-    <div className="flex flex-1 items-center justify-center px-4 py-16">
-      <div className="w-full max-w-sm">
-        <h1 className="mb-6 text-2xl font-semibold tracking-tight">
-          {isSignup ? "Create your account" : "Welcome back"}
-        </h1>
+    <div className="relative flex flex-1 items-center justify-center overflow-hidden px-4 py-14">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-96 opacity-60 [background:radial-gradient(50%_50%_at_50%_0%,var(--accent-soft)_0%,transparent_70%)]"
+      />
 
-        <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            Email
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="email"
-              placeholder="you@example.com"
-              className={INPUT_CLASS}
-            />
-          </label>
+      <div className="w-full max-w-104 animate-rise">
+        <div className="mb-7 text-center">
+          <span className="mx-auto mb-4 flex size-11 items-center justify-center rounded-xl border border-line bg-surface text-accent shadow-sm">
+            <IconSpark className="size-5" />
+          </span>
+          <h1 className="text-2xl font-semibold tracking-[-0.02em] text-fg">
+            {isSignup ? "Create your account" : "Welcome back"}
+          </h1>
+          <p className="mt-1.5 text-sm text-muted">
+            {isSignup
+              ? "Start building your own grounded knowledge base."
+              : "Sign in to your documents and answers."}
+          </p>
+        </div>
 
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            Password
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete={isSignup ? "new-password" : "current-password"}
-              placeholder="At least 8 characters"
-              className={INPUT_CLASS}
-            />
-          </label>
+        <div className="rounded-2xl border border-line bg-surface p-6 shadow-md">
+          <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
+            {/* Every field is invalid together or not at all, because validation
+                produces one message rather than a per-field map. Passing `error`
+                to each Field would paint three red borders for one mistake, so
+                the message lives in a single Alert below instead. */}
+            <Field label="Email">
+              {(field) => (
+                <Input
+                  {...field}
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="email"
+                  autoFocus
+                  placeholder="you@example.com"
+                />
+              )}
+            </Field>
 
-          {isSignup && INVITE_REQUIRED && (
-            <label className="flex flex-col gap-1.5 text-sm font-medium">
-              Invite code
-              <input
-                type="text"
-                value={inviteCode}
-                onChange={(e) => setInviteCode(e.target.value)}
-                autoComplete="off"
-                placeholder="Ask me for one"
-                className={INPUT_CLASS}
-              />
-            </label>
-          )}
+            <Field
+              label="Password"
+              hint={isSignup ? "At least 8 characters." : undefined}
+            >
+              {(field) => (
+                <Input
+                  {...field}
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete={isSignup ? "new-password" : "current-password"}
+                  placeholder="••••••••"
+                />
+              )}
+            </Field>
 
-          {error && (
-            <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-              {error}
-            </p>
-          )}
+            {isSignup && INVITE_REQUIRED && (
+              <Field label="Invite code">
+                {(field) => (
+                  <Input
+                    {...field}
+                    type="text"
+                    value={inviteCode}
+                    onChange={(e) => setInviteCode(e.target.value)}
+                    autoComplete="off"
+                    placeholder="Ask me for one"
+                  />
+                )}
+              </Field>
+            )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="mt-2 rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-          >
-            {submitting ? "Please wait…" : isSignup ? "Create account" : "Sign in"}
-          </button>
-        </form>
+            {error && <Alert tone="error">{error}</Alert>}
 
-        <p className="mt-6 text-sm text-black/60 dark:text-white/60">
+            <Button
+              type="submit"
+              variant="primary"
+              size="lg"
+              loading={submitting}
+              className="mt-1 w-full"
+            >
+              {isSignup ? "Create account" : "Sign in"}
+            </Button>
+          </form>
+        </div>
+
+        <p className="mt-6 text-center text-sm text-muted">
           {isSignup ? "Already have an account? " : "Need an account? "}
           <Link
             href={isSignup ? "/login" : "/signup"}
-            className="font-medium underline underline-offset-4"
+            className="font-medium text-accent underline-offset-4 hover:underline"
           >
             {isSignup ? "Sign in" : "Sign up"}
           </Link>

@@ -1,6 +1,7 @@
 "use client";
 
 import type { Source } from "@/lib/api";
+import { cn } from "@/lib/cn";
 
 // Renders the streamed answer, turning the model's inline "[2]" markers into
 // real citation chips.
@@ -67,7 +68,11 @@ export function AnswerView({
     // deliberate stopping point: the answer IS markdown, and rendering it
     // properly means sanitising it, since the text originates from a model
     // reading user-supplied documents.
-    <div className="text-sm leading-relaxed whitespace-pre-wrap">
+    //
+    // `text-[15px]` rather than the 14px used everywhere else: this is the one
+    // block on the page meant to be *read* as prose rather than scanned, and it
+    // gets the looser leading to match.
+    <div className="text-[15px] leading-[1.7] whitespace-pre-wrap text-fg">
       {segments.map((segment, i) =>
         segment.kind === "text" ? (
           <span key={i}>{segment.value}</span>
@@ -90,7 +95,7 @@ export function AnswerView({
           without a separate spinner competing for attention. */}
       {streaming && (
         <span
-          className="ml-0.5 inline-block h-4 w-1.5 translate-y-0.5 animate-pulse bg-current align-baseline"
+          className="ml-0.5 inline-block h-[1.05em] w-0.5 translate-y-[0.15em] animate-caret rounded-full bg-accent align-baseline"
           aria-hidden
         />
       )}
@@ -107,7 +112,7 @@ function CitationChip({
   valid: boolean;
   onClick: (n: number) => void;
 }) {
-  if (!valid) return <span className="text-black/40 dark:text-white/40">[{n}]</span>;
+  if (!valid) return <span className="text-faint">[{n}]</span>;
 
   return (
     <button
@@ -116,7 +121,11 @@ function CitationChip({
       // aria-label because the visible text is just a number — a screen reader
       // would otherwise announce "1" with no indication it's a citation link.
       aria-label={`Jump to source ${n}`}
-      className="mx-0.5 inline-flex size-4.5 translate-y-px items-center justify-center rounded bg-black/8 align-baseline text-[10px] font-semibold tabular-nums hover:bg-black/15 dark:bg-white/10 dark:hover:bg-white/20"
+      className={cn(
+        "mx-0.75 inline-flex size-4.5 translate-y-px items-center justify-center rounded-[5px]",
+        "bg-accent-soft align-baseline text-[10px] font-semibold text-accent tabular-nums",
+        "transition-colors duration-150 hover:bg-accent hover:text-on-accent",
+      )}
     >
       {n}
     </button>

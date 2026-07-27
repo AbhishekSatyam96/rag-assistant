@@ -1,16 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import { ApiError, isProcessing, listDocuments, type DocumentSummary } from "@/lib/api";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { DocumentForm } from "@/components/DocumentForm";
 import { DocumentList } from "@/components/DocumentList";
+import { PageHeader } from "@/components/AppShell";
+import { PageLoading } from "@/components/ui/PageLoading";
+import { SectionHeading } from "@/components/ui/Card";
+import { Spinner } from "@/components/ui/Spinner";
+import { ButtonLink } from "@/components/ui/Button";
+import { IconSearch } from "@/components/icons";
 
 const POLL_INTERVAL_MS = 1500;
 
 export default function DocumentsPage() {
-  const { user, token, status, logout } = useRequireAuth();
+  // `logout` is no longer destructured here — it moved into the shell's user
+  // menu, along with the per-page nav links this header used to carry.
+  const { user, token, status } = useRequireAuth();
 
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -91,50 +98,49 @@ export default function DocumentsPage() {
     setDocuments((prev) => [document, ...prev.filter((d) => d.id !== document.id)]);
   }, []);
 
-  if (status !== "authenticated" || !user || !token) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <p className="text-sm text-black/50 dark:text-white/50">Loading…</p>
-      </div>
-    );
-  }
+  if (status !== "authenticated" || !user || !token) return <PageLoading />;
+
+  const readyCount = documents.filter((d) => d.status === "READY").length;
 
   return (
-    <div className="mx-auto w-full max-w-2xl flex-1 px-4 py-10">
-      <header className="mb-8 flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Documents</h1>
-          <p className="mt-1 text-sm text-black/50 dark:text-white/50">
-            Paste text or upload a PDF to chunk and embed it for retrieval.
-          </p>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-1 text-xs">
-          <span className="text-black/50 dark:text-white/50">{user.email}</span>
-          <div className="flex gap-3">
-            <Link href="/ask" className="underline underline-offset-4">
+    <div className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6">
+      <PageHeader
+        title="Documents"
+        description="Paste text or upload a PDF to chunk and embed it for retrieval."
+        actions={
+          // Only offered once there's something to ask ABOUT. Sending someone
+          // to /ask with an empty library guarantees a refusal, and a first
+          // impression of "it doesn't work" is expensive to undo.
+          readyCount > 0 ? (
+            <ButtonLink href="/ask" variant="primary" size="sm">
+              <IconSearch className="size-4" />
               Ask
-            </Link>
-            <Link href="/me" className="underline underline-offset-4">
-              Account
-            </Link>
-            <button onClick={logout} className="underline underline-offset-4">
-              Log out
-            </button>
-          </div>
-        </div>
-      </header>
+            </ButtonLink>
+          ) : undefined
+        }
+      />
 
       <section className="mb-10">
         <DocumentForm token={token} onCreated={handleCreated} />
       </section>
 
       <section>
-        <div className="mb-3 flex items-center gap-2">
-          <h2 className="text-sm font-semibold">Your documents</h2>
-          {hasProcessing && (
-            <span className="text-xs text-black/50 dark:text-white/50">updating…</span>
-          )}
-        </div>
+        <SectionHeading
+          aside={
+            hasProcessing ? (
+              <span className="flex items-center gap-1.5 text-xs text-muted">
+                <Spinner className="size-3" />
+                updating
+              </span>
+            ) : documents.length > 0 ? (
+              <span className="text-xs text-faint tabular-nums">
+                {documents.length} total
+              </span>
+            ) : undefined
+          }
+        >
+          Your documents
+        </SectionHeading>
         <DocumentList documents={documents} loading={loading} error={loadError} />
       </section>
     </div>

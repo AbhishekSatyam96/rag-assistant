@@ -8,6 +8,12 @@ import {
   uploadPdf,
   type DocumentSummary,
 } from "@/lib/api";
+import { cn } from "@/lib/cn";
+import { Button } from "@/components/ui/Button";
+import { Field, Input, Textarea, CONTROL_CLASS } from "@/components/ui/Field";
+import { Alert } from "@/components/ui/Alert";
+import { SegmentedControl } from "@/components/ui/SegmentedControl";
+import { IconFile, IconUpload } from "@/components/icons";
 
 // Ingestion, both ways in: paste text, or upload a PDF.
 //
@@ -28,6 +34,11 @@ type DocumentFormProps = {
 };
 
 type Mode = "paste" | "pdf";
+
+const MODE_OPTIONS = [
+  { value: "paste" as const, label: "Paste text", icon: <IconFile className="size-3.5" /> },
+  { value: "pdf" as const, label: "Upload PDF", icon: <IconUpload className="size-3.5" /> },
+];
 
 // These mirror the api's zod schema (document.schema.ts) exactly. Kept in sync
 // by hand — the server remains the source of truth, this only buys instant
@@ -66,15 +77,12 @@ function formatBytes(bytes: number): string {
   return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-const INPUT_CLASS =
-  "rounded-md border border-black/15 bg-transparent px-3 py-2 text-base outline-none " +
-  "focus:border-black/40 dark:border-white/15 dark:focus:border-white/40";
-
 export function DocumentForm({ token, onCreated }: DocumentFormProps) {
   const [mode, setMode] = useState<Mode>("paste");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -93,6 +101,12 @@ export function DocumentForm({ token, onCreated }: DocumentFormProps) {
     // Clear feedback from the other mode — an error about a missing title makes
     // no sense once you've switched to uploading a file. The inputs themselves
     // are kept, so toggling back and forth doesn't lose a long paste.
+    setError(null);
+    setNotice(null);
+  }
+
+  function stageFile(next: File | null) {
+    setFile(next);
     setError(null);
     setNotice(null);
   }
@@ -163,86 +177,134 @@ export function DocumentForm({ token, onCreated }: DocumentFormProps) {
   }
 
   return (
-    <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
-      <div
-        role="tablist"
-        aria-label="Ingestion method"
-        className="flex w-fit rounded-md border border-black/10 p-0.5 text-sm dark:border-white/10"
-      >
-        <ModeTab active={mode === "paste"} onSelect={() => switchMode("paste")}>
-          Paste text
-        </ModeTab>
-        <ModeTab active={mode === "pdf"} onSelect={() => switchMode("pdf")}>
-          Upload PDF
-        </ModeTab>
-      </div>
+    <form
+      onSubmit={handleSubmit}
+      noValidate
+      className="flex flex-col gap-4 rounded-2xl border border-line bg-surface p-5 shadow-sm"
+    >
+      <SegmentedControl
+        label="Ingestion method"
+        options={MODE_OPTIONS}
+        value={mode}
+        onChange={switchMode}
+        className="self-start"
+      />
 
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
-        {/* Required for a paste, optional for a file — a file already has a
-            name, and making someone retype it is friction with no purpose. */}
-        {mode === "pdf" ? "Title (optional)" : "Title"}
-        <input
-          type="text"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder={
-            mode === "pdf" ? "Defaults to the filename" : "Q3 engineering handbook"
-          }
-          maxLength={TITLE_MAX}
-          className={INPUT_CLASS}
-        />
-      </label>
+      <Field
+        // Required for a paste, optional for a file — a file already has a
+        // name, and making someone retype it is friction with no purpose.
+        label="Title"
+        aside={mode === "pdf" ? "optional" : undefined}
+      >
+        {(field) => (
+          <Input
+            {...field}
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder={
+              mode === "pdf" ? "Defaults to the filename" : "Q3 engineering handbook"
+            }
+            maxLength={TITLE_MAX}
+          />
+        )}
+      </Field>
 
       {mode === "paste" ? (
-        <label className="flex flex-col gap-1.5 text-sm font-medium">
-          Text
-          <textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            placeholder="Paste the document text here…"
-            rows={10}
-            className={`${INPUT_CLASS} resize-y font-mono text-sm leading-relaxed`}
-          />
-        </label>
+        <Field
+          label="Text"
+          aside={`${contentLength.toLocaleString()} / ${CONTENT_MAX.toLocaleString()}`}
+          error={overLimit ? "That's past the limit — trim it or split it up." : null}
+        >
+          {(field) => (
+            <Textarea
+              {...field}
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              placeholder="Paste the document text here…"
+              rows={9}
+              className="font-mono text-[13px]"
+            />
+          )}
+        </Field>
       ) : (
-        <label className="flex flex-col gap-1.5 text-sm font-medium">
-          PDF
-          <input
-            ref={fileInputRef}
-            type="file"
-            // A hint to the file picker, not a control: it filters the dialog
-            // and nothing more. Anyone can pick "All files" past it, which is
-            // exactly why the server checks the leading bytes.
-            accept="application/pdf,.pdf"
-            onChange={(e) => {
-              setFile(e.target.files?.[0] ?? null);
-              setError(null);
-              setNotice(null);
-            }}
-            className={`${INPUT_CLASS} py-2 text-sm file:mr-3 file:rounded file:border-0 file:bg-black/8 file:px-3 file:py-1.5 file:text-sm file:font-medium dark:file:bg-white/10`}
-          />
-        </label>
+        <Field label="PDF" aside={`up to ${formatBytes(MAX_PDF_BYTES)}`}>
+          {(field) => (
+            // A drop zone wrapping a real <input type="file">, rather than a
+            // styled input. The native control can't be restyled meaningfully
+            // across browsers, but it CAN be stretched invisibly over a box we
+            // draw ourselves — which keeps the keyboard behaviour, the file
+            // picker and the form semantics entirely native while looking like
+            // the rest of the app.
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragging(true);
+              }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragging(false);
+                const dropped = e.dataTransfer.files?.[0];
+                if (!dropped) return;
+                stageFile(dropped);
+                // Mirror the drop into the real input so the DOM's idea of the
+                // staged file matches ours — otherwise resetAfterCreate has
+                // nothing to clear, and the browser's own form state disagrees
+                // with React's.
+                if (fileInputRef.current) fileInputRef.current.files = e.dataTransfer.files;
+              }}
+              className={cn(
+                CONTROL_CLASS,
+                "relative flex min-h-30 cursor-pointer flex-col items-center justify-center gap-1 border-dashed px-4 py-6 text-center",
+                dragging && "border-accent bg-accent-soft/40",
+              )}
+            >
+              <input
+                {...field}
+                ref={fileInputRef}
+                type="file"
+                // A hint to the file picker, not a control: it filters the
+                // dialog and nothing more. Anyone can pick "All files" past it,
+                // which is exactly why the server checks the leading bytes.
+                accept="application/pdf,.pdf"
+                onChange={(e) => stageFile(e.target.files?.[0] ?? null)}
+                className="absolute inset-0 cursor-pointer opacity-0"
+              />
+              <IconUpload className="size-5 text-faint" />
+              {file ? (
+                <>
+                  <span className="max-w-full truncate text-sm font-medium text-fg">
+                    {file.name}
+                  </span>
+                  <span className="text-xs text-muted">
+                    {formatBytes(file.size)} · click to replace
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="text-sm text-fg">
+                    Drop a PDF here, or click to browse
+                  </span>
+                  <span className="text-xs text-muted">
+                    Pages are preserved, so citations can say “page 7”.
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </Field>
       )}
 
-      <div className="flex items-center justify-between gap-4">
-        <span
-          className={
-            overLimit && mode === "paste"
-              ? "text-xs text-red-600 dark:text-red-400"
-              : "text-xs text-black/50 dark:text-white/50"
-          }
-        >
-          {mode === "paste"
-            ? `${contentLength.toLocaleString()} / ${CONTENT_MAX.toLocaleString()} characters`
-            : file
-              ? `${file.name} · ${formatBytes(file.size)}`
-              : `PDF, up to ${formatBytes(MAX_PDF_BYTES)}`}
-        </span>
+      {error && <Alert tone="error">{error}</Alert>}
+      {notice && <Alert tone="info">{notice}</Alert>}
 
-        <button
+      <div className="flex items-center justify-end gap-3">
+        <Button
           type="submit"
-          disabled={submitting || (mode === "paste" && overLimit)}
-          className="rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+          variant="primary"
+          loading={submitting}
+          disabled={mode === "paste" && overLimit}
         >
           {/* Ingestion is synchronous today and chunk+embed takes a few seconds,
               so this label is doing real work — without it the page looks hung.
@@ -257,43 +319,8 @@ export function DocumentForm({ token, onCreated }: DocumentFormProps) {
             : mode === "pdf"
               ? "Upload PDF"
               : "Ingest document"}
-        </button>
+        </Button>
       </div>
-
-      {error && (
-        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-          {error}
-        </p>
-      )}
-      {notice && <p className="text-sm text-black/60 dark:text-white/60">{notice}</p>}
     </form>
-  );
-}
-
-// `type="button"` is load-bearing: a <button> inside a <form> defaults to
-// type="submit", so without it, switching tabs would submit the form.
-function ModeTab({
-  active,
-  onSelect,
-  children,
-}: {
-  active: boolean;
-  onSelect: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onSelect}
-      className={`rounded px-3 py-1 transition-colors ${
-        active
-          ? "bg-black/8 font-medium dark:bg-white/10"
-          : "text-black/50 hover:text-black/80 dark:text-white/50 dark:hover:text-white/80"
-      }`}
-    >
-      {children}
-    </button>
   );
 }

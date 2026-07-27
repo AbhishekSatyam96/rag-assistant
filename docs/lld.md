@@ -224,7 +224,7 @@ sequenceDiagram
     R->>R: createDocumentSchema.parse — 400 on failure
     R->>S: ingestDocument({userId from TOKEN, ...})
 
-    Note over C,R: PDF variant — POST /documents/upload<br/>multer(memory, 10MB) → %PDF- magic bytes<br/>→ extractPdf → 422 if no text<br/>→ pages.join("\n\n") → same call below, plus `pages`
+    Note over C,R: PDF variant — POST /documents/upload<br/>multer memory 10MB → %PDF- magic bytes<br/>→ extractPdf → 422 if no text<br/>→ join pages → same call below, plus pages[]
 
     S->>S: sha256(content)
     S->>DB: findUnique(userId_contentHash)

@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import type { Source } from "@/lib/api";
+import { cn } from "@/lib/cn";
+import { Pill } from "@/components/ui/Badge";
+import { IconExpand, IconFile } from "@/components/icons";
 
 // The citations panel: what the answer was actually built from.
 //
@@ -27,12 +30,17 @@ export function SourceList({ sources, focused }: SourceListProps) {
 
   return (
     <ul className="flex flex-col gap-2">
-      {sources.map((source) => (
-        <SourceCard
+      {sources.map((source, i) => (
+        <li
           key={`${source.documentId}-${source.chunkIndex}`}
-          source={source}
-          focused={focused === source.n}
-        />
+          className="animate-rise"
+          // Sources all arrive in one event, so without this they'd appear as a
+          // single block. A 40ms cascade reads as "these came back from a
+          // search" rather than "the layout jumped".
+          style={{ animationDelay: `${i * 40}ms` }}
+        >
+          <SourceCard source={source} focused={focused === source.n} />
+        </li>
       ))}
     </ul>
   );
@@ -48,48 +56,60 @@ function SourceCard({ source, focused }: { source: Source; focused: boolean }) {
   const truncated = source.content.length > preview.length;
 
   return (
-    <li
+    <div
       // `id` is what the citation chip scrolls to — see the page's
       // onCitationClick. Derived from `n` so the two sides agree by construction.
       id={`source-${source.n}`}
-      className={`rounded-md border p-3 transition-colors ${
+      // `scroll-mt` keeps the card clear of the sticky header when it's scrolled
+      // into view. Without it, clicking a citation lands the card's top edge
+      // underneath the header — the one thing you were trying to read.
+      className={cn(
+        "scroll-mt-20 rounded-xl border bg-surface p-3.5 shadow-sm transition-[border-color,box-shadow,background-color] duration-200",
         focused
-          ? "border-black/40 bg-black/[0.03] dark:border-white/40 dark:bg-white/[0.04]"
-          : "border-black/10 dark:border-white/10"
-      }`}
+          ? "border-accent ring-4 ring-accent/15"
+          : "border-line hover:border-line-strong",
+      )}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="inline-flex size-5 shrink-0 items-center justify-center rounded bg-black/8 text-[10px] font-semibold tabular-nums dark:bg-white/10">
+          <span
+            className={cn(
+              "inline-flex size-5 shrink-0 items-center justify-center rounded-md text-[10px] font-semibold tabular-nums transition-colors",
+              focused ? "bg-accent text-on-accent" : "bg-accent-soft text-accent",
+            )}
+          >
             {source.n}
           </span>
-          <span className="truncate text-xs font-medium">{source.documentTitle}</span>
+          <IconFile className="size-3.5 shrink-0 text-faint" />
+          <span className="truncate text-xs font-medium text-fg">
+            {source.documentTitle}
+          </span>
           {/* The point of PDF ingestion, in one line of UI. `page` is set only
               when the document had pages, so a pasted-text source simply shows
               nothing here — deliberately no "chunk 12" fallback, because that
               names an internal detail the reader cannot go and verify, which is
               the opposite of what a citation is for. */}
           {source.page !== null && (
-            <span className="shrink-0 text-[11px] whitespace-nowrap text-black/45 tabular-nums dark:text-white/45">
+            <span className="shrink-0 text-[11px] whitespace-nowrap text-faint tabular-nums">
               p. {source.page}
             </span>
           )}
         </div>
 
-        <span
-          className="shrink-0 text-[10px] text-black/40 tabular-nums dark:text-white/40"
+        <Pill
           // The raw cosine similarity, surfaced deliberately. It's the fastest
           // way to see WHY an answer was weak: a top hit at 0.31 means retrieval
           // found nothing relevant, which is a very different bug from the model
           // misreading a good chunk. Most products hide this; during development
           // it's the single most useful number on the page.
           title={`Cosine similarity — chunk ${source.chunkIndex}`}
+          className="shrink-0"
         >
           {source.similarity.toFixed(3)}
-        </span>
+        </Pill>
       </div>
 
-      <p className="mt-2 text-xs leading-relaxed break-words text-black/60 dark:text-white/60">
+      <p className="mt-2.5 text-xs leading-relaxed wrap-break-word text-muted">
         {expanded ? source.content : preview}
         {truncated && !expanded && "…"}
       </p>
@@ -98,11 +118,13 @@ function SourceCard({ source, focused }: { source: Source; focused: boolean }) {
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-1.5 text-[11px] underline underline-offset-4 opacity-60 hover:opacity-100"
+          aria-expanded={expanded}
+          className="mt-2 inline-flex items-center gap-1.5 rounded text-[11px] font-medium text-muted transition-colors hover:text-fg"
         >
+          <IconExpand className="size-3" />
           {expanded ? "Show less" : "Show full chunk"}
         </button>
       )}
-    </li>
+    </div>
   );
 }

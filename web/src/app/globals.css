@@ -1,26 +1,242 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ---------------------------------------------------------------------------
+   Design tokens
+   ---------------------------------------------------------------------------
+   Every colour in the app is a SEMANTIC token — `surface`, `line`, `muted` —
+   not a literal one like `black/15`. Two consequences, both load-bearing:
+
+   1. Dark mode stops being a per-element concern. The old code wrote
+      `border-black/10 dark:border-white/10` on every single element, which is
+      two chances to get it wrong and a guaranteed drift once someone adds a
+      component and forgets the `dark:` half. Here the *token* flips and the
+      component just says `border-line`. There is almost no `dark:` in this
+      codebase now, by design.
+   2. Re-theming is one block of CSS, not a find-and-replace across 10 files.
+
+   Colours are OKLCH rather than hex: it's perceptually uniform, so holding
+   lightness fixed and varying only hue gives swatches that actually *look*
+   like the same weight. That's what keeps the greys neutral and the accent
+   from vibrating against them.
+
+   The neutrals carry a small amount of chroma at hue 265 (a cool blue). Pure
+   greys read as cheap on a screen; a few thousandths of chroma is invisible as
+   "blue" but reads as considered.
+--------------------------------------------------------------------------- */
+
+:root,
+[data-theme="light"] {
+  /* Backgrounds, from furthest back to closest to the reader. */
+  --canvas: oklch(0.985 0.002 265); /* page */
+  --surface: oklch(1 0 0); /* cards, inputs */
+  --raised: oklch(0.968 0.003 265); /* hover, wells, inset panels */
+
+  /* Hairlines. `line` is the default; `line-strong` is for focus/selected. */
+  --line: oklch(0.912 0.005 265);
+  --line-strong: oklch(0.845 0.008 265);
+
+  /* Text, in descending importance. Every one of these clears 4.5:1 on
+     --canvas except `faint`, which is only ever used for non-essential
+     metadata (timestamps, similarity scores) and clears 3:1. */
+  --fg: oklch(0.235 0.012 265);
+  --muted: oklch(0.505 0.013 265);
+  --faint: oklch(0.635 0.012 265);
+
+  --accent: oklch(0.53 0.205 275);
+  --accent-hover: oklch(0.475 0.205 275);
+  --accent-soft: oklch(0.955 0.022 275); /* tinted background */
+  --accent-line: oklch(0.86 0.06 275);
+  --on-accent: oklch(1 0 0);
+
+  --success: oklch(0.52 0.13 156);
+  --success-soft: oklch(0.955 0.035 156);
+  --warn: oklch(0.55 0.13 75);
+  --warn-soft: oklch(0.96 0.045 75);
+  --danger: oklch(0.53 0.19 22);
+  --danger-soft: oklch(0.962 0.025 22);
+
+  /* Shadows are tuned per theme, not shared. A shadow that reads as "lifted"
+     on white is invisible on near-black — dark UIs get their depth from
+     lighter surfaces and a top highlight instead. */
+  --shadow-sm: 0 1px 2px oklch(0.235 0.012 265 / 0.06);
+  --shadow-md:
+    0 4px 12px -2px oklch(0.235 0.012 265 / 0.08), 0 2px 4px -2px oklch(0.235 0.012 265 / 0.05);
+  --shadow-lg:
+    0 16px 40px -8px oklch(0.235 0.012 265 / 0.12), 0 4px 12px -4px oklch(0.235 0.012 265 / 0.07);
+
+  color-scheme: light;
 }
 
+[data-theme="dark"] {
+  --canvas: oklch(0.163 0.011 265);
+  --surface: oklch(0.203 0.013 265);
+  --raised: oklch(0.245 0.015 265);
+
+  --line: oklch(0.288 0.015 265);
+  --line-strong: oklch(0.375 0.018 265);
+
+  --fg: oklch(0.968 0.004 265);
+  --muted: oklch(0.735 0.014 265);
+  --faint: oklch(0.585 0.016 265);
+
+  /* Lighter and less saturated than the light-mode accent. A colour keeps its
+     "loudness" relative to its background, so the light-mode indigo on a dark
+     canvas would glare — this is the same hue tuned for the new backdrop. */
+  --accent: oklch(0.685 0.165 275);
+  --accent-hover: oklch(0.745 0.155 275);
+  --accent-soft: oklch(0.285 0.075 275);
+  --accent-line: oklch(0.42 0.115 275);
+  --on-accent: oklch(0.16 0.03 275);
+
+  --success: oklch(0.76 0.15 156);
+  --success-soft: oklch(0.28 0.06 156);
+  --warn: oklch(0.79 0.14 75);
+  --warn-soft: oklch(0.3 0.055 75);
+  --danger: oklch(0.71 0.17 22);
+  --danger-soft: oklch(0.3 0.08 22);
+
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.3);
+  --shadow-md: 0 4px 12px -2px oklch(0 0 0 / 0.4), 0 2px 4px -2px oklch(0 0 0 / 0.3);
+  --shadow-lg: 0 16px 40px -8px oklch(0 0 0 / 0.55), 0 4px 12px -4px oklch(0 0 0 / 0.4);
+
+  color-scheme: dark;
+}
+
+/* `inline` keeps these as `var()` references instead of copying the values in
+   at build time. That is what makes runtime theme switching work at all: the
+   utility class compiles to `background: var(--surface)`, so flipping
+   data-theme on <html> re-resolves every colour in the document at once. */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-line: var(--accent-line);
+  --color-on-accent: var(--on-accent);
+
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+
+  --animate-caret: caret 1.1s ease-in-out infinite;
+  --animate-rise: rise 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-shimmer: shimmer 1.6s ease-in-out infinite;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* The theme is driven by an attribute, so the `dark:` variant has to follow it
+   rather than the media query Tailwind assumes by default. Kept available for
+   the handful of cases tokens can't express — a gradient stop that needs a
+   different opacity per theme, for instance. Reach for a token first. */
+@custom-variant dark ([data-theme="dark"] &);
+
+@keyframes caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes shimmer {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    /* `grayscale` renders text at the weight the type was designed for on a
+       dark background; the default subpixel smoothing fattens light-on-dark
+       glyphs noticeably. */
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* One focus style for the entire app, defined once. `focus-visible` rather
+     than `focus` so a mouse click doesn't leave a ring behind, while keyboard
+     navigation always gets one — removing it outright is the single most
+     common accessibility regression in a redesign. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--fg);
+  }
+
+  /* The theme toggle animates colours across the whole tree. Transitioning
+     `*` is normally a performance smell, but it's scoped to a class the
+     provider adds for ~200ms and removes again. */
+  .theme-transition,
+  .theme-transition * {
+    transition:
+      background-color 180ms ease,
+      border-color 180ms ease,
+      color 180ms ease !important;
+  }
+
+  /* Respect the OS "reduce motion" setting. The caret and the rise-in are
+     decoration; nothing in this UI depends on animation to be understood. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@utility scrollbar-slim {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
 }

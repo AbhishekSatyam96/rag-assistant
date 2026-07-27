@@ -1,8 +1,12 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/use-require-auth";
+import { PageHeader } from "@/components/AppShell";
+import { PageLoading } from "@/components/ui/PageLoading";
+import { Button, ButtonLink } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
+import { IconArrowRight, IconLogout } from "@/components/icons";
 
 // The protected page — the frontend mirror of the api's /me smoke test. Its
 // content comes straight from the token the api validated.
@@ -12,43 +16,52 @@ export default function MePage() {
   // it moved into useRequireAuth so /documents shares it verbatim.
   const { user, status, logout } = useRequireAuth();
 
-  if (status !== "authenticated" || !user) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <p className="text-sm text-black/50 dark:text-white/50">Loading…</p>
-      </div>
-    );
-  }
+  if (status !== "authenticated" || !user) return <PageLoading />;
 
   return (
-    <div className="flex flex-1 items-center justify-center px-4 py-16">
-      <div className="w-full max-w-sm">
-        <p className="mb-1 text-sm text-black/50 dark:text-white/50">Signed in as</p>
-        <h1 className="mb-6 text-2xl font-semibold tracking-tight break-all">{user.email}</h1>
+    <div className="mx-auto w-full max-w-2xl flex-1 px-4 py-10 sm:px-6">
+      <PageHeader
+        title="Account"
+        description="Everything the API knows about you, straight from the validated token."
+      />
 
-        <dl className="mb-8 rounded-md border border-black/10 p-4 text-sm dark:border-white/10">
-          <dt className="mb-1 text-black/50 dark:text-white/50">User ID</dt>
-          <dd className="font-mono break-all">{user.id}</dd>
-        </dl>
+      <Card className="divide-y divide-line">
+        <Row label="Email" value={user.email} />
+        <Row label="User ID" value={user.id} mono />
+      </Card>
 
-        <div className="flex gap-3">
-          <Link
-            href="/documents"
-            className="rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
-          >
-            Documents
-          </Link>
-          <button
-            onClick={() => {
-              logout();
-              router.push("/login");
-            }}
-            className="rounded-md border border-black/15 px-4 py-2 text-sm font-medium hover:bg-black/5 dark:border-white/15 dark:hover:bg-white/5"
-          >
-            Log out
-          </button>
-        </div>
+      <div className="mt-6 flex flex-wrap items-center gap-2">
+        <ButtonLink href="/ask" variant="primary">
+          Ask a question
+          <IconArrowRight className="size-4" />
+        </ButtonLink>
+        <ButtonLink href="/documents">Documents</ButtonLink>
+        <Button
+          variant="danger"
+          className="ml-auto"
+          onClick={() => {
+            logout();
+            router.push("/login");
+          }}
+        >
+          <IconLogout className="size-4" />
+          Log out
+        </Button>
       </div>
+    </div>
+  );
+}
+
+// A definition row. `break-all` on the value because a user id is an
+// unbreakable 25-character string that would otherwise push the card wide
+// enough to scroll the page sideways on a phone.
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex flex-col gap-1 px-5 py-4 sm:flex-row sm:items-center sm:gap-6">
+      <dt className="w-28 shrink-0 text-[13px] text-muted">{label}</dt>
+      <dd className={`min-w-0 break-all text-sm text-fg ${mono ? "font-mono text-[13px]" : ""}`}>
+        {value}
+      </dd>
     </div>
   );
 }

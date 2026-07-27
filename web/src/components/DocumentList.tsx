@@ -1,43 +1,21 @@
 "use client";
 
 import { isProcessing, type DocStatus, type DocumentSummary } from "@/lib/api";
+import { Badge } from "@/components/ui/Badge";
+import { Alert } from "@/components/ui/Alert";
+import { EmptyState } from "@/components/ui/Card";
+import { IconFile } from "@/components/icons";
 
 // Every state the api's DocStatus machine can be in gets an explicit visual.
 // Typing this as a full Record means adding a status to the enum server-side
 // becomes a TypeScript error here, rather than a row that silently renders
 // nothing.
-const STATUS_STYLE: Record<DocStatus, { label: string; className: string }> = {
-  PENDING: {
-    label: "Queued",
-    className: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
-  },
-  PROCESSING: {
-    label: "Processing",
-    className: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
-  },
-  READY: {
-    label: "Ready",
-    className: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
-  },
-  FAILED: {
-    label: "Failed",
-    className: "bg-red-500/10 text-red-700 dark:text-red-400",
-  },
+const STATUS: Record<DocStatus, { label: string; tone: "neutral" | "warn" | "success" | "danger"; pulse?: boolean }> = {
+  PENDING: { label: "Queued", tone: "warn", pulse: true },
+  PROCESSING: { label: "Processing", tone: "warn", pulse: true },
+  READY: { label: "Ready", tone: "success" },
+  FAILED: { label: "Failed", tone: "danger" },
 };
-
-function StatusBadge({ status }: { status: DocStatus }) {
-  const { label, className } = STATUS_STYLE[status];
-  return (
-    <span
-      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${className}`}
-    >
-      {(status === "PENDING" || status === "PROCESSING") && (
-        <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
-      )}
-      {label}
-    </span>
-  );
-}
 
 // `createdAt` arrives as an ISO string (JSON has no date type). This renders
 // only after a client-side fetch, so there's no server/client formatting
@@ -56,61 +34,80 @@ type DocumentListProps = {
 };
 
 export function DocumentList({ documents, loading, error }: DocumentListProps) {
+  // A skeleton here rather than the spinner used on page load, and the reason
+  // is the inverse of PageLoading's: by this point we know a list is coming, so
+  // reserving its shape stops the page reflowing when the rows land.
   if (loading) {
-    return <p className="text-sm text-black/50 dark:text-white/50">Loading documents…</p>;
-  }
-
-  if (error) {
     return (
-      <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-        {error}
-      </p>
+      <ul className="flex flex-col gap-2" aria-hidden>
+        {[0, 1, 2].map((i) => (
+          <li
+            key={i}
+            className="h-19 animate-shimmer rounded-xl border border-line bg-surface"
+            style={{ animationDelay: `${i * 120}ms` }}
+          />
+        ))}
+      </ul>
     );
   }
 
+  if (error) return <Alert tone="error">{error}</Alert>;
+
   if (documents.length === 0) {
     return (
-      <div className="rounded-md border border-dashed border-black/15 p-8 text-center dark:border-white/15">
-        <p className="text-sm text-black/60 dark:text-white/60">
-          No documents yet. Paste some text above to ingest your first one.
-        </p>
-      </div>
+      <EmptyState icon={<IconFile />} title="No documents yet">
+        Paste some text or drop in a PDF above — it gets chunked and embedded so you
+        can ask about it.
+      </EmptyState>
     );
   }
 
   return (
     <ul className="flex flex-col gap-2">
-      {documents.map((doc) => (
-        <li
-          key={doc.id}
-          className="rounded-md border border-black/10 p-4 dark:border-white/10"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <h3 className="text-sm font-medium break-words">{doc.title}</h3>
-            <StatusBadge status={doc.status} />
-          </div>
+      {documents.map((doc) => {
+        const status = STATUS[doc.status];
+        return (
+          <li
+            key={doc.id}
+            className="rounded-xl border border-line bg-surface p-4 shadow-sm transition-colors duration-150 hover:border-line-strong"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-2.5">
+                <span className="mt-px flex size-7 shrink-0 items-center justify-center rounded-lg bg-raised text-muted">
+                  <IconFile className="size-3.5" />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-medium wrap-break-word text-fg">{doc.title}</h3>
+                  <p className="mt-0.5 text-xs text-muted">
+                    {/* chunkCount is denormalised onto Document server-side
+                        precisely so this list doesn't need a COUNT(*) against
+                        Chunk. */}
+                    {doc.status === "READY"
+                      ? `${doc.chunkCount} ${doc.chunkCount === 1 ? "chunk" : "chunks"}`
+                      : isProcessing(doc)
+                        ? "Chunking and embedding…"
+                        : "Not indexed"}
+                    <span className="mx-1.5 text-faint">·</span>
+                    <span className="text-faint">{formatDate(doc.createdAt)}</span>
+                  </p>
+                </div>
+              </div>
 
-          <p className="mt-1.5 text-xs text-black/50 dark:text-white/50">
-            {/* chunkCount is denormalised onto Document server-side precisely so
-                this list doesn't need a COUNT(*) against Chunk. */}
-            {doc.status === "READY"
-              ? `${doc.chunkCount} ${doc.chunkCount === 1 ? "chunk" : "chunks"}`
-              : isProcessing(doc)
-                ? "Chunking and embedding…"
-                : "Not indexed"}
-            {" · "}
-            {formatDate(doc.createdAt)}
-          </p>
+              <Badge tone={status.tone} dot pulse={status.pulse}>
+                {status.label}
+              </Badge>
+            </div>
 
-          {/* A FAILED document explains itself inline — this is why `error` is in
-              the list select rather than detail-only. */}
-          {doc.status === "FAILED" && doc.error && (
-            <p className="mt-2 rounded bg-red-500/5 px-2 py-1.5 font-mono text-xs break-words text-red-700 dark:text-red-400">
-              {doc.error}
-            </p>
-          )}
-        </li>
-      ))}
+            {/* A FAILED document explains itself inline — this is why `error` is
+                in the list select rather than detail-only. */}
+            {doc.status === "FAILED" && doc.error && (
+              <p className="mt-3 rounded-lg border border-danger/25 bg-danger-soft px-2.5 py-2 font-mono text-[11px] wrap-break-word text-danger">
+                {doc.error}
+              </p>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }
