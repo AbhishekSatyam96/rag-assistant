@@ -335,7 +335,34 @@ than a Redis migration would have been.
 
 ---
 
-## Phase 5 — frontend and domains
+## Phase 5 — frontend and domains ✅ DONE 2026-07-27
+
+Live at **https://rag.abhisheksatyam.com** → **https://api.abhisheksatyam.com**.
+
+Both certificates issued by Let's Encrypt, valid to 25 Oct 2026. The apex
+portfolio is untouched — DNS lives at Spaceship, so each subdomain is a CNAME
+added by hand to a per-project target; Vercel cannot create them itself because
+it does not run the nameservers.
+
+Verified end to end, as the browser actually does it:
+
+| Check | Result |
+| --- | --- |
+| All 6 routes | 200 |
+| Baked API URL in the shipped bundle | `api.abhisheksatyam.com`, **zero** `localhost:4000` |
+| Login with real `Origin` header | 200 + `access-control-allow-origin` echoed |
+| `GET /documents` | tenant-scoped list returned |
+| Grounded question | sources 1067ms → tokens 1868–2144ms, cited |
+| Off-corpus question | the exact `REFUSAL` constant — no invention |
+
+The bundle check is the one worth repeating on future deploys: `NEXT_PUBLIC_*` is
+substituted at build time, so "is the right API URL actually in the JavaScript"
+is a different question from "is the env var set", and only the first one matters
+to a visitor.
+
+Latency warm is ~2.1s end to end vs ~3.0s cold.
+
+## Phase 5 — frontend and domains (original plan)
 
 1. New Vercel project, **Root Directory `web`**. No root `package.json` or lockfile exists, and
    each subdirectory is a standalone pnpm project, so Vercel installs from `web/pnpm-lock.yaml`
