@@ -1,5 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "regions": ["sin1"],
-  "installCommand": "npx --yes pnpm@11.17.0 --version && npx --yes pnpm@11.17.0 install --frozen-lockfile"
+  "installCommand": "npx --yes pnpm@11.17.0 install --frozen-lockfile && npx --yes pnpm@11.17.0 exec prisma generate"
 }
