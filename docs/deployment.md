@@ -196,7 +196,18 @@ Test: start a query, kill the tab, watch whether the OpenAI stream actually stop
 
 ---
 
-## Phase 3 — platform limits that collide with shipped features
+## Phase 3 — platform limits that collide with shipped features ✅ DONE 2026-07-27
+
+Cap lowered to 4 MB and moved into `api/src/lib/upload.ts` alongside the sentence
+that describes it. The drift this prevents had already happened: the limit lived
+in `document.routes.ts` while `middleware/error.ts` spelled "10 MB" out in prose,
+on the stated reasoning that "the middleware has no business importing a route's
+constant just to format a sentence." Good instinct about layering, wrong trade —
+the moment the cap moved, enforcement changed and the message did not, telling
+users a limit that was not the limit. Enforcement and explanation are one fact.
+
+`web/src/lib/api.ts` mirrors it (two codebases cannot share a constant across an
+HTTP boundary) and says so, plus a docs sweep of the stale 10 MB figure.
 
 ### 3.1 The PDF upload cap is above the platform's
 

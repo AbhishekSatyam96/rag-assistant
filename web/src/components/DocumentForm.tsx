@@ -310,7 +310,7 @@ export function DocumentForm({ token, onCreated }: DocumentFormProps) {
               so this label is doing real work — without it the page looks hung.
               The PDF path adds extraction on top, so it says what it's doing.
               No progress bar: fetch exposes no upload-progress event (that
-              needs XMLHttpRequest), and at a 10 MB cap the upload is not the
+              needs XMLHttpRequest), and at a 4 MB cap the upload is not the
               part of the wait worth reporting on. */}
           {submitting
             ? mode === "pdf"

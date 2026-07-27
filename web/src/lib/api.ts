@@ -162,10 +162,16 @@ export function createDocument(
 }
 
 // The upload ceiling, mirrored from MAX_UPLOAD_BYTES in the api's
-// document.routes.ts. Checked client-side purely so a 40 MB file is refused
-// instantly instead of after a 40 MB upload — the server limit is the one that
+// lib/upload.ts. Checked client-side purely so an oversized file is refused
+// instantly instead of after a full upload — the server limit is the one that
 // actually enforces anything.
-export const MAX_PDF_BYTES = 10 * 1024 * 1024;
+//
+// 4 MB is not a judgement about PDFs: it sits under Vercel's hard 4.5 MB
+// request-body limit, above which the platform rejects the request at the edge
+// with its own error page, before the API can answer in its usual `{ error }`
+// shape. Two codebases cannot share a constant across an HTTP boundary, so this
+// is a mirror and will drift if the server value changes without this one.
+export const MAX_PDF_BYTES = 4 * 1024 * 1024;
 
 // PDF upload. Resolves to the SAME `{ document, deduped }` shape as
 // createDocument, which is what lets the documents page reuse one handler, one

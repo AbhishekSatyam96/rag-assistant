@@ -2,6 +2,7 @@ import type { ErrorRequestHandler } from "express";
 import { MulterError } from "multer";
 import { ZodError } from "zod";
 import { HttpError } from "../lib/http-error.js";
+import { MAX_UPLOAD_LABEL } from "../lib/upload.js";
 
 // body-parser (i.e. express.json()) can reject a request before it ever reaches
 // a route: body over the configured limit, malformed JSON, an encoding we can't
@@ -54,10 +55,14 @@ function multerMessage(err: MulterError): { status: number; message: string } {
   switch (err.code) {
     case "LIMIT_FILE_SIZE":
       // Multer's own message is "File too large" with no number in it, which
-      // leaves the user guessing at the limit. See MAX_UPLOAD_BYTES in
-      // document.routes.ts — kept in words here because the middleware has no
-      // business importing a route's constant just to format a sentence.
-      return { status: 413, message: "That file is too large. The limit is 10 MB." };
+      // leaves the user guessing at the limit. The number is imported rather
+      // than written out: this message used to hardcode "10 MB" and kept saying
+      // so after the cap dropped to 4 MB, telling users a limit that was not the
+      // limit. See lib/upload.ts.
+      return {
+        status: 413,
+        message: `That file is too large. The limit is ${MAX_UPLOAD_LABEL}.`,
+      };
     case "LIMIT_FILE_COUNT":
     case "LIMIT_UNEXPECTED_FILE":
       // Either more files than configured, or a file on a field name we don't

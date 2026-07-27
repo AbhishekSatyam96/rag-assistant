@@ -38,8 +38,22 @@ queryRouter.post("/", async (req, res) => {
   // in-flight OpenAI request instead of streaming tokens into a dead socket.
   // Without this we pay, in full, for output nobody will ever see, and the
   // request occupies a connection until the model finishes talking to itself.
+  //
+  // On Vercel this only works because vercel.json sets supportsCancellation:
+  // request cancellation is OPT-IN there, and without it the platform never
+  // signals a disconnect, so this listener never fires and the abort above is
+  // decorative — the expensive failure mode, because it looks correct in the
+  // source and costs money in production.
+  //
+  // The log line is the only way to tell those two states apart from outside:
+  // a completed stream logs nothing, an abandoned one logs here. It doubles as
+  // a cost signal, since abandonment rate is what this guard is protecting.
   const abort = new AbortController();
-  res.on("close", () => abort.abort());
+  res.on("close", () => {
+    if (res.writableEnded) return; // normal completion, not a disconnect
+    console.log(`[queries] client disconnected mid-stream, aborting generation`);
+    abort.abort();
+  });
 
   const events = queryService.answerQuestion({
     userId: currentUserId(req),

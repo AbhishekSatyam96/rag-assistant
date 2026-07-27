@@ -2,6 +2,7 @@ import { Router, type Request } from "express";
 import multer from "multer";
 import { HttpError } from "../../lib/http-error.js";
 import { extractPdf, hasNoText } from "../../lib/pdf.js";
+import { MAX_UPLOAD_BYTES } from "../../lib/upload.js";
 import { ingestLimiter } from "../../middleware/rate-limit.js";
 import {
   CONTENT_MAX,
@@ -32,7 +33,10 @@ function currentUserId(req: Request): string {
 
 // --- PDF upload --------------------------------------------------------------
 
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+// The cap and the sentence describing it both live in lib/upload.ts, so the
+// error message cannot drift away from what is enforced. The real fix for large
+// files is client-side upload straight to blob storage, bypassing the function
+// body entirely — a feature, not a constant, and deferred.
 
 // WHY memoryStorage AND NOT diskStorage
 // The file exists only long enough to be turned into text — nothing downstream
@@ -95,7 +99,7 @@ function titleFromFilename(filename: string): string {
 // `ingestLimiter` is reused deliberately: same budget, because this ends in the
 // same embedding calls. The middleware ORDER matters — the limiter runs BEFORE
 // multer, so a rate-limited caller is rejected without us first accepting and
-// buffering 10 MB from them.
+// buffering the whole file from them.
 documentRouter.post("/upload", ingestLimiter, upload.single("file"), async (req, res) => {
   // `req.file` is undefined when the field is missing or misnamed. Multer does
   // not treat that as an error, so an explicit check is the difference between
@@ -133,7 +137,7 @@ documentRouter.post("/upload", ingestLimiter, upload.single("file"), async (req,
   const content = extracted.pages.join("\n\n").trim();
 
   // The same ceiling the paste path enforces, checked here because the text did
-  // not arrive in a body zod could validate. A 10 MB PDF can easily exceed it.
+  // not arrive in a body zod could validate. A 4 MB PDF can easily exceed it.
   //
   // REJECT RATHER THAN TRUNCATE. Silently keeping the first 200k characters
   // produces a document the user believes is complete; they then ask about

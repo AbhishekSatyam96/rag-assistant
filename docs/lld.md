@@ -224,7 +224,7 @@ sequenceDiagram
     R->>R: createDocumentSchema.parse — 400 on failure
     R->>S: ingestDocument({userId from TOKEN, ...})
 
-    Note over C,R: PDF variant — POST /documents/upload<br/>multer memory 10MB → %PDF- magic bytes<br/>→ extractPdf → 422 if no text<br/>→ join pages → same call below, plus pages[]
+    Note over C,R: PDF variant — POST /documents/upload<br/>multer memory 4MB → %PDF- magic bytes<br/>→ extractPdf → 422 if no text<br/>→ join pages → same call below, plus pages[]
 
     S->>S: sha256(content)
     S->>DB: findUnique(userId_contentHash)
@@ -488,7 +488,7 @@ Verified: an abort leaves no unhandled rejection.
 | `POST` | `/auth/login` | — | `200 {user, token}` | `400` · `401` |
 | `GET` | `/me` | ✅ | `200 {user}` | `401` |
 | `POST` | `/documents` | ✅ | `201 {document, deduped:false}` · `200 {…, deduped:true}` | `400` · `401` · `413` · `429` · `500` |
-| `POST` | `/documents/upload` | ✅ | *identical shape* — `201` / `200 {…, deduped:true}` | `400` not-a-PDF, corrupt, password-protected, no file, wrong field, text over 200k · `401` · `413` >10 MB · **`422`** parsed but no extractable text · `429` · `500` |
+| `POST` | `/documents/upload` | ✅ | *identical shape* — `201` / `200 {…, deduped:true}` | `400` not-a-PDF, corrupt, password-protected, no file, wrong field, text over 200k · `401` · `413` >4 MB · **`422`** parsed but no extractable text · `429` · `500` |
 | `GET` | `/documents` | ✅ | `200 {documents: Summary[]}` | `401` |
 | `GET` | `/documents/:id` | ✅ | `200 {document}` | `401` · **`404`** |
 | `POST` | `/queries` | ✅ | `200` NDJSON stream | `400` · `401` · `500` before headers; in-band `error` after |
