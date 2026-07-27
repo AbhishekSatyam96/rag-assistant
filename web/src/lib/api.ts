@@ -10,7 +10,35 @@
 // passes the token in. Keeping this file pure makes it trivial to reason about
 // and to reuse for the ingestion / query endpoints later.
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+// WHY THIS IS NOT JUST `?? "http://localhost:4000"`.
+//
+// NEXT_PUBLIC_* is substituted at BUILD time by literal text replacement — it is
+// not read at runtime. So a production build made without the variable set does
+// not fall back to anything sensible; it ships a bundle that asks every
+// visitor's own machine for the API. That fails as a connection error with no
+// server-side trace, on the visitor's browser, and setting the variable
+// afterwards fixes nothing until the app is rebuilt.
+//
+// A silent localhost fallback is therefore only ever correct in development. In
+// a production build its absence is a deploy misconfiguration, and the right
+// time to find out is while building — not from a user reporting that nothing
+// loads. Same fail-fast reasoning as lib/env.ts on the api side.
+function resolveBaseUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_URL;
+  if (configured) return configured;
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "NEXT_PUBLIC_API_URL is not set. It is baked in at build time, so this " +
+        "bundle would point every visitor at http://localhost:4000. Set it on " +
+        "the deployment (e.g. https://api.abhisheksatyam.com) and rebuild.",
+    );
+  }
+
+  return "http://localhost:4000";
+}
+
+const BASE_URL = resolveBaseUrl();
 
 export type AuthUser = {
   id: string;
