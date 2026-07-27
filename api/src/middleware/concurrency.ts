@@ -1,5 +1,5 @@
 import type { RequestHandler } from "express";
-import { HttpError } from "../lib/http-error";
+import { HttpError } from "../lib/http-error.js";
 
 // Caps how many requests one user may have IN FLIGHT at the same instant.
 //

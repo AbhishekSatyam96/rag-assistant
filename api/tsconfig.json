@@ -1,8 +1,15 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
+    // NodeNext, NOT Bundler. This package is "type": "module", so the compiled
+    // output is resolved by Node's ESM loader, which demands a real file
+    // extension on every relative specifier. "Bundler" permits extensionless
+    // imports and TypeScript emits them UNCHANGED — code that compiles cleanly
+    // and then dies at runtime with ERR_MODULE_NOT_FOUND. NodeNext makes the
+    // compiler enforce what Node will actually require, so the failure moves
+    // from production to `tsc`.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,

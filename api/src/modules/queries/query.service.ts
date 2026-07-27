@@ -1,5 +1,5 @@
-import { retrieveChunks, type RetrievedChunk } from "../../lib/retrieve";
-import { streamAnswer } from "../../lib/answer";
+import { retrieveChunks, type RetrievedChunk } from "../../lib/retrieve.js";
+import { streamAnswer } from "../../lib/answer.js";
 
 // Orchestration for the RAG read path: retrieve → ground → generate.
 //

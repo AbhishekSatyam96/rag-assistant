@@ -1,6 +1,6 @@
-import { openai } from "./openai";
-import { env } from "./env";
-import type { RetrievedChunk } from "./retrieve";
+import { openai } from "./openai.js";
+import { env } from "./env.js";
+import type { RetrievedChunk } from "./retrieve.js";
 
 // Generation: retrieved chunks in, a grounded answer out, streamed token by
 // token.

@@ -1,5 +1,5 @@
 import { SignJWT, jwtVerify } from "jose";
-import { env } from "./env";
+import { env } from "./env.js";
 
 // jose wants the secret as bytes, not a string. Encode it once at module load.
 const secret = new TextEncoder().encode(env.JWT_SECRET);

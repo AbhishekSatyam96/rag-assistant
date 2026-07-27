@@ -1,5 +1,5 @@
-import { prisma } from "../lib/prisma";
-import { ingestDocument } from "../modules/documents/document.service";
+import { prisma } from "../lib/prisma.js";
+import { ingestDocument } from "../modules/documents/document.service.js";
 
 // Smoke test for the M4 ingestion pipeline — the FIRST time this code makes a
 // real OpenAI call and a real write to Neon. It exists to prove the pipeline

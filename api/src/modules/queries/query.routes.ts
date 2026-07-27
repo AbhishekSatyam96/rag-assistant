@@ -1,8 +1,8 @@
 import { Router, type Request, type Response } from "express";
-import { HttpError } from "../../lib/http-error";
-import { askSchema } from "./query.schema";
-import * as queryService from "./query.service";
-import type { QueryEvent } from "./query.service";
+import { HttpError } from "../../lib/http-error.js";
+import { askSchema } from "./query.schema.js";
+import * as queryService from "./query.service.js";
+import type { QueryEvent } from "./query.service.js";
 
 // Mounted behind requireAuth in app.ts, same as documentRouter — protection at
 // the mount point, not per-route.

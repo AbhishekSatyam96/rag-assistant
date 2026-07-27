@@ -1,6 +1,6 @@
 import type { RequestHandler } from "express";
-import { HttpError } from "../lib/http-error";
-import { verifyToken } from "../lib/jwt";
+import { HttpError } from "../lib/http-error.js";
+import { verifyToken } from "../lib/jwt.js";
 
 // Guards protected routes. Clients send `Authorization: Bearer <token>`.
 // On success we attach `req.user` and call next(); otherwise we 401.

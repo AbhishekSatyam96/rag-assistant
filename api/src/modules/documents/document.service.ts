@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { Prisma } from "../../generated/prisma/client";
-import type { DocStatus } from "../../generated/prisma/enums";
-import { prisma } from "../../lib/prisma";
-import { chunkPages, chunkText } from "../../lib/chunk";
-import { embed } from "../../lib/embed";
-import { HttpError } from "../../lib/http-error";
+import { Prisma } from "../../generated/prisma/client.js";
+import type { DocStatus } from "../../generated/prisma/enums.js";
+import { prisma } from "../../lib/prisma.js";
+import { chunkPages, chunkText } from "../../lib/chunk.js";
+import { embed } from "../../lib/embed.js";
+import { HttpError } from "../../lib/http-error.js";
 
 // The ingestion pipeline: take a document's raw text and turn it into
 // searchable, cite-able chunks. It ties together the two helpers you just

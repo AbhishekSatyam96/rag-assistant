@@ -1,5 +1,5 @@
-import { prisma } from "./prisma";
-import { embed } from "./embed";
+import { prisma } from "./prisma.js";
+import { embed } from "./embed.js";
 
 // Vector search: question in, the most semantically similar chunks out.
 //

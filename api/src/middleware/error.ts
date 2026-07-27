@@ -1,7 +1,7 @@
 import type { ErrorRequestHandler } from "express";
 import { MulterError } from "multer";
 import { ZodError } from "zod";
-import { HttpError } from "../lib/http-error";
+import { HttpError } from "../lib/http-error.js";
 
 // body-parser (i.e. express.json()) can reject a request before it ever reaches
 // a route: body over the configured limit, malformed JSON, an encoding we can't

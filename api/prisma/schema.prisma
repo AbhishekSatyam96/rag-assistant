@@ -3,9 +3,17 @@
 
 // Get a free hosted Postgres database in seconds: `npx create-db`
 
+// `importFileExtension` is load-bearing for deployment, not a style choice.
+// This package is "type": "module", so Node resolves the COMPILED output with
+// ESM rules, which require a real file extension on every relative specifier.
+// By default the generated client imports its own files extensionlessly
+// (`from "./class"`), which resolves under a bundler and throws
+// ERR_MODULE_NOT_FOUND under Node. Local dev never caught it because tsx
+// resolves like a bundler.
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  importFileExtension = "js"
 }
 
 datasource db {

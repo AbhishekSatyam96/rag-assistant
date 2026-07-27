@@ -1,9 +1,9 @@
-import { prisma } from "../../lib/prisma";
-import { HttpError } from "../../lib/http-error";
-import { signToken } from "../../lib/jwt";
-import { env } from "../../lib/env";
-import { hashPassword, verifyPassword } from "./password";
-import type { Credentials, SignupInput } from "./auth.schema";
+import { prisma } from "../../lib/prisma.js";
+import { HttpError } from "../../lib/http-error.js";
+import { signToken } from "../../lib/jwt.js";
+import { env } from "../../lib/env.js";
+import { hashPassword, verifyPassword } from "./password.js";
+import type { Credentials, SignupInput } from "./auth.schema.js";
 
 // The service layer holds business logic and talks to the DB. It knows nothing
 // about `req`/`res` — that's the route's job. Keeping it HTTP-free means we can

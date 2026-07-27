@@ -1,17 +1,17 @@
 import express from "express";
 import cors from "cors";
-import { prisma } from "./lib/prisma";
-import { authRouter } from "./modules/auth/auth.routes";
-import { documentRouter } from "./modules/documents/document.routes";
-import { queryRouter } from "./modules/queries/query.routes";
-import { requireAuth } from "./middleware/auth";
-import { errorHandler } from "./middleware/error";
-import { limitConcurrent } from "./middleware/concurrency";
+import { prisma } from "./lib/prisma.js";
+import { authRouter } from "./modules/auth/auth.routes.js";
+import { documentRouter } from "./modules/documents/document.routes.js";
+import { queryRouter } from "./modules/queries/query.routes.js";
+import { requireAuth } from "./middleware/auth.js";
+import { errorHandler } from "./middleware/error.js";
+import { limitConcurrent } from "./middleware/concurrency.js";
 import {
   queryBurstLimiter,
   queryDailyLimiter,
   globalQueryLimiter,
-} from "./middleware/rate-limit";
+} from "./middleware/rate-limit.js";
 
 // Building the app in a function (instead of at module top-level) keeps the
 // wiring separate from "start listening". Later this lets a test file import

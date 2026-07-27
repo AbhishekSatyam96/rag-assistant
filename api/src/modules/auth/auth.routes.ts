@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { credentialsSchema, signupSchema } from "./auth.schema";
-import { signupLimiter, loginLimiter } from "../../middleware/rate-limit";
-import * as authService from "./auth.service";
+import { credentialsSchema, signupSchema } from "./auth.schema.js";
+import { signupLimiter, loginLimiter } from "../../middleware/rate-limit.js";
+import * as authService from "./auth.service.js";
 
 // The route layer is thin on purpose: parse/validate input, call the service,
 // shape the response. No business logic lives here.

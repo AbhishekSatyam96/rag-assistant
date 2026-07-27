@@ -1,15 +1,15 @@
 import { Router, type Request } from "express";
 import multer from "multer";
-import { HttpError } from "../../lib/http-error";
-import { extractPdf, hasNoText } from "../../lib/pdf";
-import { ingestLimiter } from "../../middleware/rate-limit";
+import { HttpError } from "../../lib/http-error.js";
+import { extractPdf, hasNoText } from "../../lib/pdf.js";
+import { ingestLimiter } from "../../middleware/rate-limit.js";
 import {
   CONTENT_MAX,
   TITLE_MAX,
   createDocumentSchema,
   uploadDocumentSchema,
-} from "./document.schema";
-import * as documentService from "./document.service";
+} from "./document.schema.js";
+import * as documentService from "./document.service.js";
 
 // Thin route layer, same shape as auth.routes.ts: validate input, call the
 // service, choose a status code. No business logic here.

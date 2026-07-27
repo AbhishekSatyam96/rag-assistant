@@ -1,5 +1,5 @@
-import app from "./app";
-import { env } from "./lib/env";
+import app from "./app.js";
+import { env } from "./lib/env.js";
 
 // LOCAL DEVELOPMENT ONLY. `pnpm dev` runs this file; Vercel never loads it.
 //

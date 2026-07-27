@@ -1,4 +1,4 @@
-import { openai } from "./openai";
+import { openai } from "./openai.js";
 
 const EMBED_MODEL = "text-embedding-3-small"; // 1536 dims — must match vector(1536)
 const BATCH_SIZE = 100;

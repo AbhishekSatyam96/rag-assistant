@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { env } from "./env";
+import { env } from "./env.js";
 
 // A single shared OpenAI client for the whole app. Create it once here and
 // import it wherever you need embeddings/completions — reusing one client keeps

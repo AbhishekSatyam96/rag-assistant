@@ -1,7 +1,7 @@
 import { rateLimit, ipKeyGenerator, MINUTE, HOUR, DAY } from "express-rate-limit";
 import type { Request } from "express";
-import { HttpError } from "../lib/http-error";
-import { env } from "../lib/env";
+import { HttpError } from "../lib/http-error.js";
+import { env } from "../lib/env.js";
 
 // Every rate limit in the app, in one file.
 //

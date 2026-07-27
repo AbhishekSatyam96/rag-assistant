@@ -1,5 +1,5 @@
 import { extractText } from "unpdf";
-import { HttpError } from "./http-error";
+import { HttpError } from "./http-error.js";
 
 // PDF → text. The parser layer the ingestion pipeline deliberately did not have
 // until now (see the scope note at the top of document.service.ts): everything
