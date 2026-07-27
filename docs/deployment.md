@@ -157,9 +157,42 @@ manual and deliberate is the correct posture anyway.
 
 ---
 
-## Phase 2 — verify what the platform silently changed
+## Phase 2 — verify what the platform silently changed ✅ DONE 2026-07-27
 
-These are assumptions, not tasks. Test them before building on top of them.
+**Streaming works.** Measured against production, not assumed:
+
+```
+content-type:       application/x-ndjson; charset=utf-8
+transfer-encoding:  chunked
+network chunks:     11
+sources event at    1344 ms
+first token at      2824 ms     <- 1.5s later, in a separate chunk
+```
+
+The proof is the gap, not the token spread. A buffered response delivers
+everything at once; you cannot get 1.5 seconds between two parts of one body.
+"Sources first, so the screen fills during the wait" survives serverless intact.
+(A short answer's tokens all land within ~150ms simply because there are 15 of
+them — that is not evidence of buffering, and a naive spread threshold will lie
+to you here.)
+
+**Cancellation works, but only because it is now switched on.** It is opt-in, so
+before `supportsCancellation` the `res.on("close")` handler never fired and the
+AbortController was decorative — the expensive failure, since it looks right in
+the source. Proven by killing the TCP socket right after the sources event and
+matching the request id to the log line:
+
+```
+x-vercel-id  bom1::sin1::q97hs-1785149091582-8636bca79d3e
+log          [queries] client disconnected mid-stream, aborting generation
+```
+
+Same request. The disconnect really does reach Express.
+
+**Noticed while reading the logs:** the pg `sslmode` deprecation warning is
+emitted at `level: "error"` on every cold start. Harmless, but it inflates the
+error rate and will camouflage a real error later. Set `sslmode=verify-full` in
+`DATABASE_URL` — identical behaviour today, just explicit.
 
 ### 2.1 Does NDJSON streaming survive?
 
