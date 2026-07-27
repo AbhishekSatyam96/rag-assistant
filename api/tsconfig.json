@@ -1,15 +1,26 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    // NodeNext, NOT Bundler. This package is "type": "module", so the compiled
-    // output is resolved by Node's ESM loader, which demands a real file
-    // extension on every relative specifier. "Bundler" permits extensionless
-    // imports and TypeScript emits them UNCHANGED — code that compiles cleanly
-    // and then dies at runtime with ERR_MODULE_NOT_FOUND. NodeNext makes the
-    // compiler enforce what Node will actually require, so the failure moves
-    // from production to `tsc`.
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    // WHY EVERY RELATIVE IMPORT IN src/ ENDS IN .js
+    //
+    // This package is "type": "module", so Node resolves the COMPILED output
+    // with ESM rules, which demand a real file extension on every relative
+    // specifier. TypeScript emits specifiers verbatim, so an extensionless
+    // `./lib/prisma` compiles cleanly and then dies at runtime with
+    // ERR_MODULE_NOT_FOUND. tsx resolves like a bundler, so dev never sees it.
+    //
+    // "Bundler" ALLOWS the .js suffix (mapping ./x.js -> x.ts); it just does
+    // not require it. NodeNext would require it and catch a future omission at
+    // compile time, which is strictly better — but Vercel's builder type-checks
+    // this project with its own TypeScript setup and reports errors under
+    // NodeNext that our own tsc 5.9.3 does not (openai "not constructable",
+    // unresolved generated Prisma client). Bundler is the resolution mode that
+    // platform demonstrably compiles, so it stays.
+    //
+    // The tradeoff: nothing here fails the build if someone adds an import
+    // without .js. `node dist/index.js` is what catches that — see README.
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
