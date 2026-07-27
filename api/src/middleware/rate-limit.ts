@@ -1,7 +1,14 @@
 import { rateLimit, ipKeyGenerator, MINUTE, HOUR, DAY } from "express-rate-limit";
+import RedisStore from "rate-limit-redis";
 import type { Request } from "express";
 import { HttpError } from "../lib/http-error.js";
 import { env } from "../lib/env.js";
+import { redis } from "../lib/redis.js";
+
+// Aliased to a local const so TypeScript's narrowing survives into the
+// sendCommand closure below. An imported binding is not narrowed inside a
+// callback, since the module could in principle reassign it.
+const client = redis;
 
 // Every rate limit in the app, in one file.
 //
@@ -19,11 +26,24 @@ import { env } from "../lib/env.js";
 //   - concurrency  → middleware/concurrency.ts. A 10/min limit still allows ten
 //                    simultaneous in-flight completions in the same second.
 //
-// STORE: in-memory, which means each process keeps its own counters. On a
-// single instance that is exact; behind an autoscaler the effective limit is
-// (limit x instance count). That is acceptable today because the instance count
-// is 1, and the fix is a one-line swap to `rate-limit-redis` — not a redesign —
-// because everything below goes through makeLimiter().
+// STORE: Redis, via rate-limit-redis. Previously in-memory, with the note that
+// "the fix is a one-line swap ... because everything below goes through
+// makeLimiter()". That held — the seam was right and no limiter definition
+// changed — but the swap was not one line, for a reason worth keeping:
+//
+// EVERY LIMITER NEEDS ITS OWN KEY PREFIX. rate-limit-redis defaults every store
+// to the prefix `rl:`, and queryBurstLimiter (1 minute) and queryDailyLimiter
+// (1 day) both key on req.user.id. Sharing a prefix means both would INCR the
+// SAME Redis key with different expiries: the daily counter would be reset by
+// the burst window, and the daily budget would silently stop existing. Nothing
+// errors. The limits would just be wrong in a way that looks like flakiness.
+// Hence `name` is required on LimiterConfig and becomes the prefix.
+//
+// In development REDIS_URL may be unset, in which case these fall back to the
+// in-memory store so a clone runs with no infrastructure. That fallback is NOT
+// reachable in production: lib/env.ts refuses to boot without REDIS_URL, because
+// per-instance limits on an autoscaling platform report correctly in every
+// header and enforce nothing.
 
 // Sized against the per-request cost of each route (roughly: a query is one
 // small embedding plus a ~2k-token gpt-4o-mini completion; an ingest is up to
@@ -51,6 +71,15 @@ const LIMITS = {
 } as const;
 
 type LimiterConfig = {
+  /**
+   * Unique, stable identifier for this limiter. Becomes the Redis key prefix.
+   *
+   * REQUIRED, not optional with a default — two limiters sharing a prefix while
+   * sharing a key generator silently corrupt each other's counters, and the
+   * type system is the only thing that can make that impossible to forget.
+   * Changing a name resets that limiter's counters, which is harmless.
+   */
+  name: string;
   windowMs: number;
   limit: number;
   message: string;
@@ -59,6 +88,7 @@ type LimiterConfig = {
 };
 
 function makeLimiter({
+  name,
   windowMs,
   limit,
   message,
@@ -70,6 +100,20 @@ function makeLimiter({
     limit,
     keyGenerator,
     skipSuccessfulRequests,
+
+    // Redis when configured, otherwise express-rate-limit's default memory
+    // store. See the STORE note at the top of this file for why that fallback
+    // cannot happen in production.
+    store: client
+      ? new RedisStore({
+          prefix: `rl:${name}:`,
+          // rate-limit-redis speaks raw commands so it stays client-agnostic.
+          // ioredis's `call` takes the command and its arguments positionally,
+          // which is exactly this signature.
+          sendCommand: (...args: string[]) =>
+            client.call(args[0], ...args.slice(1)) as Promise<never>,
+        })
+      : undefined,
 
     // draft-8 `RateLimit` / `RateLimit-Policy` headers, and none of the legacy
     // `X-RateLimit-*` ones. A client that wants to back off politely can read
@@ -126,6 +170,7 @@ const byUser = (req: Request): string => req.user?.id ?? byIp(req);
 // argon2id is deliberately slow, so a signup flood is a CPU exhaustion attack
 // on a single Cloud Run instance.
 export const signupLimiter = makeLimiter({
+  name: "signup",
   windowMs: 1 * HOUR,
   limit: LIMITS.signupPerHour,
   keyGenerator: byIp,
@@ -137,6 +182,7 @@ export const signupLimiter = makeLimiter({
 // devices. Only failed logins consume the budget; sign in correctly and the
 // count is refunded.
 export const loginLimiter = makeLimiter({
+  name: "login",
   windowMs: 15 * MINUTE,
   limit: LIMITS.loginPer15Min,
   keyGenerator: byIp,
@@ -150,6 +196,7 @@ export const loginLimiter = makeLimiter({
 // the Postgres writes. Cheap per document, but it is the kind of route a script
 // calls in a loop. Ten full-size ingests an hour is more than any human paste.
 export const ingestLimiter = makeLimiter({
+  name: "ingest",
   windowMs: 1 * HOUR,
   limit: LIMITS.ingestPerHour,
   keyGenerator: byUser,
@@ -165,6 +212,7 @@ export const ingestLimiter = makeLimiter({
 // Mounted burst-first, so a flood is rejected by the cheap short window and
 // never consumes the daily budget it was trying to drain.
 export const queryBurstLimiter = makeLimiter({
+  name: "query-burst",
   windowMs: 1 * MINUTE,
   limit: LIMITS.queriesPerMinute,
   keyGenerator: byUser,
@@ -172,6 +220,7 @@ export const queryBurstLimiter = makeLimiter({
 });
 
 export const queryDailyLimiter = makeLimiter({
+  name: "query-daily",
   windowMs: 1 * DAY,
   limit: LIMITS.queriesPerDay,
   keyGenerator: byUser,
@@ -188,6 +237,7 @@ export const queryDailyLimiter = makeLimiter({
 // budget, which is not something organic demo traffic does — and a demo that is
 // briefly unavailable is strictly better than a bill I did not agree to.
 export const globalQueryLimiter = makeLimiter({
+  name: "query-global",
   windowMs: 1 * DAY,
   limit: LIMITS.queriesPerDayGlobal,
   keyGenerator: () => "global",

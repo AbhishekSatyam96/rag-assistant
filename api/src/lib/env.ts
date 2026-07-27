@@ -23,11 +23,46 @@ const envSchema = z.object({
   // string is exactly the value that would look configured while silently
   // disabling the check, so it is rejected at startup instead.
   SIGNUP_INVITE_CODE: z.string().min(1).optional(),
+  // The rate limiters' shared store. Optional in development so a clone runs
+  // with no infrastructure beyond Postgres, REQUIRED in production — see the
+  // refinement below, which is the whole point of this variable existing.
+  REDIS_URL: z
+    .string()
+    .min(1)
+    .refine((v) => v.startsWith("redis://") || v.startsWith("rediss://"), {
+      message: "REDIS_URL must start with redis:// or rediss://",
+    })
+    .optional(),
   PORT: z.coerce.number().default(4000),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
 
-const parsed = envSchema.safeParse(process.env);
+// REDIS_URL is mandatory in production, and deliberately fatal rather than a
+// silent fallback to the in-memory store.
+//
+// The memory store is EXACT on one instance and meaningless on many: the real
+// limit becomes (limit x instance count), and this app is deployed to a platform
+// that scales instances on its own. A fallback would therefore produce limits
+// that report correctly in every header and enforce nothing — the same class of
+// failure as a rate limiter with a bug, except silent and permanent.
+//
+// Refusing to boot is the right trade here specifically because signup is open
+// and every question spends money at an external API. A process that will not
+// start is a page of logs; a limiter that quietly stopped limiting is a bill.
+const envSchema2 = envSchema.superRefine((val, ctx) => {
+  if (val.NODE_ENV === "production" && !val.REDIS_URL) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["REDIS_URL"],
+      message:
+        "REDIS_URL is required in production. Without it the rate limiters fall " +
+        "back to per-instance memory, so the effective limit becomes (limit x " +
+        "instances) and the global daily cap stops being global.",
+    });
+  }
+});
+
+const parsed = envSchema2.safeParse(process.env);
 if (!parsed.success) {
   console.error("❌ Invalid environment variables:");
   for (const issue of parsed.error.issues) {
