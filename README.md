@@ -72,11 +72,10 @@ The full set lives in the design docs below — each is also written into the co
 
 ## Design docs
 
-This started as an exercise in designing a system properly, not just shipping one. All three mark **built** vs **degraded** vs **designed-not-built** explicitly, including the known gaps.
+This started as an exercise in designing a system properly, not just shipping one. Both mark **built** vs **degraded** vs **designed-not-built** explicitly, including the known gaps.
 
 - **[High-Level Design](docs/hld.md)** — topology, capacity, failure modes, blast radius, and the scaling ladder.
 - **[Low-Level Design](docs/lld.md)** — data model, state machines, sequence diagrams, API contracts, concurrency and idempotency semantics.
-- **[Deployment notes](docs/deployment.md)** — what going live actually broke, what it cost architecturally, and how each piece was verified.
 
 ---
 
