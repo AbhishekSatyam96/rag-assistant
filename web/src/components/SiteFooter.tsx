@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { cn } from "@/lib/cn";
 import { AUTHOR, COPYRIGHT_YEAR, LINKS } from "@/lib/site";
 import {
@@ -81,7 +82,17 @@ export function SiteFooter() {
           <nav aria-label="Elsewhere" className="flex items-center gap-4 text-[13px]">
             <FooterLink href={LINKS.portfolio}>Portfolio</FooterLink>
             <FooterLink href={LINKS.projects}>Projects</FooterLink>
-            <FooterLink href={LINKS.repo}>Source</FooterLink>
+            {/* Internal, so a plain Link — and it replaced a "Source" link
+                straight to the repository. That repository is private, which
+                made this the one item in the footer guaranteed to 404 for
+                every visitor who clicked it. The case study is the public
+                answer to the question that link was there to answer. */}
+            <Link
+              href="/case-study"
+              className="text-muted transition-colors duration-150 hover:text-fg"
+            >
+              Case study
+            </Link>
           </nav>
         </div>
       </div>
