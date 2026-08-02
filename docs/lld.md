@@ -93,7 +93,32 @@ retrieveChunks({ userId, question, k?, embedFn?: typeof embed })
 
 This exists so the **database path** — including the tenant scoping in raw SQL — can be exercised
 with a deterministic stub and no OpenAI bill. `pnpm smoke:ingest --fake` uses it. `createApp()` is
-factored the same way, so supertest can hit routes in-memory without opening a port.
+factored the same way, and `pnpm test` now uses that: supertest hits routes in-memory without
+opening a port, against the real middleware chain in the real order rather than a stubbed one.
+
+**The test tiers, and why they are separate commands.** Merging them means CI is either expensive
+or red for reasons unrelated to the change.
+
+| Tier | Command | Needs | Determinism |
+|---|---|---|---|
+| Unit + HTTP | `pnpm test` | nothing | exact |
+| Integration | *(not yet built)* | Postgres, stub embedder | exact |
+| Eval | `pnpm eval:*` | Postgres + OpenAI | scored, not pass/fail |
+
+The unit tier asserts only what resolves before the first query — `requireAuth` rejections, body
+parser failures, routing, and pure functions like `chunkText`. One consequence worth knowing: an
+oversized body returns `413`, not `401`, because `express.json()` is mounted app-wide and therefore
+runs ahead of the auth guard. That ordering is pinned by a test, since the intuitive expectation is
+the opposite.
+
+Two smaller notes that cost real time to learn:
+
+- **`tsx` strips types without checking them**, so a type error in a test file runs happily and
+  fails as a confusing assertion instead. `pnpm test` runs `tsc --noEmit` first for that reason.
+- **`env.ts` validates at import time and calls `process.exit(1)` on failure**, so importing
+  `createApp` transitively requires `DATABASE_URL`, `JWT_SECRET` and `OPENAI_API_KEY` to exist even
+  for tests that never open a socket. A committed `.env.test` of fake values satisfies it;
+  `REDIS_URL` is left unset so `lib/redis.ts` exports `null` and no handle keeps the runner alive.
 
 ---
 
@@ -604,7 +629,7 @@ Real ones, from the code — not a list assembled to look longer.
 | Ingestion is synchronous 🟡 | **High** — timeouts, no retry, stranded rows | Queue + worker (§4.2) |
 | `FAILED` documents cannot be retried 🟡 | **High** — dead end for the user | Job retry, or exclude `FAILED` from dedupe |
 | Documents stranded in `PROCESSING` 🟡 | **High** — no reaper | Job lease expiry |
-| No automated tests | **High** — `retrieve.ts` tenant scoping is uncovered raw SQL | supertest via `createApp()`; start with tenant isolation |
+| No **integration** tests 🟡 | **High** — `retrieve.ts` tenant scoping is uncovered raw SQL, and the unit tier cannot reach it: proving isolation needs two real users with real rows | An integration tier against real Postgres with a stub `embedFn`. Start with tenant isolation, then the P2002 dedupe race and NDJSON line buffering. The unit + HTTP tier (`pnpm test`) covers everything resolving before the first query. |
 | `WEB_ORIGIN` bypasses zod validation 🟡 | Medium — silent CORS misconfiguration in prod | Move into `envSchema` |
 | `k`, `chunkSize`, `chunkOverlap` unvalidated | Medium — chosen by judgement | M7 eval harness |
 | Per-page chunking makes the page a **hard chunk boundary** | Medium — `chunkOverlap` cannot bridge a page break, and a PDF of short pages yields many tiny, weakly-retrievable chunks | Merge pass over consecutive short pages — needs a page *range* on `Chunk`, so a schema change. Gated on M7 measuring whether it matters. |

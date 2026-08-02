@@ -1,0 +1,19 @@
+{
+  // The eval harness is type-checked but NEVER built or deployed.
+  //
+  // The base tsconfig has `rootDir: "src"` and `include: ["src"]`, which is what
+  // keeps `dist/` (and therefore the Vercel bundle) free of harness code, corpus
+  // loaders and fixture builders. Putting eval/ under src/ would ship all of it
+  // to production to sit there unused.
+  //
+  // But "not built" must not mean "not checked" — the harness is where the
+  // project's headline numbers come from, and a silent type error there
+  // produces a wrong number rather than a crash. So: a second config that sees
+  // both trees, emits nothing, and runs in `pnpm typecheck` alongside the first.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src", "eval"]
+}

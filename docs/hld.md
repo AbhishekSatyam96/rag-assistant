@@ -475,10 +475,10 @@ is also written into the code it governs, next to the thing it explains.
 |---|---|---|
 | M1–M6 | DB · auth · ingestion · documents UI · retrieval · streamed answers | ✅ |
 | PDF upload | Multipart route · pdf.js extraction · page-aware chunking · page-level citations | ✅ |
-| **M7 — evals** | Golden question set · hit-rate@k / MRR · groundedness · refusal accuracy · **per-page vs. whole-document chunking** | ➡️ **next** |
+| **M7 — evals** | Test runner + 42 tests ✅ · reproducible corpus ✅ · golden question set ⬜ · hit-rate@k / MRR ⬜ · groundedness ⬜ · refusal accuracy ⬜ · **per-page vs. whole-document chunking** 🟡 measured, not yet scored | 🟡 **in progress** |
 | M8 — async write path | pg-boss · worker service · retry · `202 Accepted` · reprocess job | ⬜ |
 | M9 — deployment | **Vercel × 2** (web + API as a function), custom subdomains, Redis-backed limits | ✅ **2026-07-27** |
-| Hardening | ~~Rate limiting~~ ✅ (Redis-backed) · refresh tokens · helmet · httpOnly cookies · automated tests | 🟡 partial |
+| Hardening | ~~Rate limiting~~ ✅ (Redis-backed) · ~~automated tests~~ ✅ (unit + HTTP tier) · refresh tokens · helmet · httpOnly cookies | 🟡 partial |
 
 **M9 landed before M7, and not on the planned infrastructure.** Cloud Run was dropped rather than
 postponed: its always-free tier covers US regions only while the database sits in `ap-southeast-1`,
@@ -491,11 +491,27 @@ boot in production). The concurrency guard stayed in-memory deliberately — see
 **PDF upload added a fourth number for M7 to settle, and a structural one.** Chunking each page
 independently makes the page boundary a *hard* chunk boundary: `chunkOverlap` cannot bridge a
 paragraph that spans two pages, and `chunkSize` acquires a second maximum that appears in no config
-— the length of a page. A 300-page PDF of short pages yields ~300 tiny chunks instead of ~45
-well-sized ones, and small chunks embed into vague vectors that retrieve on surface keywords rather
-than meaning. The fix is a merge pass over consecutive short pages, which needs a page *range* on
-`Chunk` and is therefore a schema change, not a tweak. Left unbuilt on purpose: whether it matters
-depends entirely on the corpus, and hit-rate@k can answer that where judgement cannot.
+— the length of a page. The fix is a merge pass over consecutive short pages, which needs a page
+*range* on `Chunk` and is therefore a schema change, not a tweak.
+
+**The effect is no longer hypothetical.** The eval corpus renders each source document at two page
+densities, which holds the text constant and varies only how much of it lands on a page. At roughly
+2,150 chars/page the split behaves normally — median chunk ~950 characters, about 5% of chunks under
+300. At roughly 330 chars/page it collapses: **the chars-per-page and chars-per-chunk distributions
+come out identical**, meaning every page produced exactly one chunk and `chunkSize: 1000` was never
+consulted. Median chunk size falls to ~330 and roughly 38% land under 300 characters.
+
+That is the mechanism, reproduced on demand rather than argued for.
+
+> Exact counts are deliberately absent. **This document is one of the corpus sources**, so any figure
+> printed here alters the measurement it reports — editing this paragraph moved the sparse rendering
+> from 121 pages to 122. `pnpm eval:inspect` prints the current numbers; the *shape* above is what's
+> stable.
+
+What is still *not* measured is whether it costs anything that matters: vague vectors are a
+plausible story about retrieval, not evidence about it. Running the identical golden set against
+each rendering makes page density the only variable that moved, so the hit-rate delta is
+attributable. The merge pass stays unbuilt until that number exists.
 
 **M7 before M8, deliberately.** The eval harness is smaller, already specified, and turns `k=5`,
 `chunkSize=1000`, and `chunkOverlap=200` from judgement calls into measured numbers. It also
@@ -503,6 +519,13 @@ populates §7.3 and §7.4, which are the weakest parts of this document. But **d
 boundary now** — keep `ingestDocument` callable as a plain function so the worker and the eval
 harness invoke the same code, and M8 becomes "move the call site" rather than a rewrite.
 
-Two open questions, unchanged: **the demo corpus**, and **whether to persist queries.** The second
-stops being optional at M7 — answers are currently assembled server-side and discarded, and you
-cannot score what you threw away.
+**The demo-corpus question is settled; the query-persistence one is not, and it turned out not to
+block M7.** The corpus is this repo's own documentation, chosen because contamination — not size —
+is what invalidates a RAG eval: a model that already knows the answer produces a correct-looking
+response whether retrieval worked or not, so hit-rate, groundedness and refusal accuracy all stop
+measuring the system. Text written for this repo cannot be in any training set.
+
+An earlier draft of this section claimed query persistence "stops being optional at M7 — you cannot
+score what you threw away." That was wrong, and the reasoning is worth keeping: the harness calls
+`answerQuestion` directly and collects the generator, so the answer never has to survive a request
+to be scored. Persistence buys history, caching and dollar metering. It buys evals nothing.

@@ -1,0 +1,18 @@
+# Build artifacts only. The text half of the corpus is NOT here — markdown
+# sources are read straight out of the repo at eval time (see eval/sources.ts
+# for why copying them was a mistake), so the only thing in corpus/ is what has
+# to be generated: the rendered PDFs and the manifest describing them.
+#
+# Why these aren't committed:
+#
+#   1. Two of the PDF sources are docs excluded from this repo on purpose (see
+#      .git/info/exclude). Committing a PDF of them republishes exactly what
+#      that exclusion was for.
+#   2. The portfolio artifact is the METHOD and the NUMBERS, not the text. A
+#      reader needs golden.ts (the questions and their ground-truth anchors) and
+#      results/ (what the harness measured) to judge the work. Several megabytes
+#      of rendered PDF adds nothing they can check.
+#
+# `pnpm eval:corpus` rebuilds everything below from the docs in one step, and
+# `pnpm eval:inspect` warns when what's here no longer matches them.
+corpus/

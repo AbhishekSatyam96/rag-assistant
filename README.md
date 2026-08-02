@@ -131,6 +131,15 @@ pnpm dev                          # http://localhost:3000
 
 There's no seeded account — sign up at `/signup`, add a document at `/documents`, then ask about it at `/ask`.
 
+### Tests
+
+```bash
+cd api
+pnpm test                   # type-check, then 42 unit + HTTP tests
+```
+
+No database, no network, no spend — everything asserted resolves before the first query. Env comes from a committed `.env.test` of deliberately fake values, because `env.ts` validates at import time and would otherwise refuse to boot. Type-checking runs first on purpose: `tsx` strips types without checking them, so test files are the one place where a type error can reach runtime.
+
 ### Smoke test
 
 ```bash
@@ -173,6 +182,14 @@ Backend layering is **routes → service → lib**: routes validate input and ch
 
 Because the app spends real money on behalf of anyone who signs up, `/queries` and `/auth/*` carry per-user burst and daily limits, a global daily ceiling, and a cap on concurrent streams — a rate limit bounds requests per window, not simultaneous in-flight generations. Counters live in Redis so they hold across instances.
 
-**Next up — an evaluation harness:** a golden question set with retrieval hit-rate@k / MRR, groundedness, and refusal accuracy. It exists to settle the numbers currently chosen by judgement (`k`, chunk size, chunk overlap). Temperature 0 and the fixed refusal string are what make those metrics measurable in the first place.
+**In progress — an evaluation harness:** a golden question set with retrieval hit-rate@k / MRR, groundedness, and refusal accuracy, to settle the numbers currently chosen by judgement (`k`, chunk size, chunk overlap). Temperature 0 and the fixed refusal string are what make those metrics measurable in the first place.
 
-**Deliberately deferred:** OCR for scanned PDFs (they're detected and rejected with a specific error), refresh-token rotation, per-user dollar metering, query persistence, and reranking / hybrid search / query rewriting — all held until evals can prove they help. There's no automated test suite yet either; verification so far is runtime scripts and end-to-end probes, with `createApp()` already factored for supertest.
+Built so far: a 42-test suite that runs with no database and no network, and a reproducible eval corpus built from this repo's own documentation — chosen because pretraining contamination is what quietly invalidates a RAG eval. If the model already knows the answer, hit-rate can be zero and the answer still looks right.
+
+That corpus has already produced one result. Rendering the same document at two page densities and chunking both shows the short-page rendering collapsing to **exactly one chunk per page** — the chars-per-page and chars-per-chunk distributions come out identical, which means `chunkSize: 1000` never applies at all, because the page boundary decides every split before it. Median chunk size drops from roughly 950 characters to roughly 330, and around 38% of chunks land under 300. The merge pass that would fix it needs a page *range* on `Chunk`, so it stays unbuilt until hit-rate says the damage is real.
+
+(Exact counts deliberately aren't quoted here. This README is itself one of the corpus documents, so any figure printed in it changes the thing it measures — run `pnpm eval:inspect` for current numbers.)
+
+Still to come in this milestone: the golden set itself, and every metric above. **No accuracy or quality number is claimed anywhere in this repo yet, because none has been measured.**
+
+**Deliberately deferred:** OCR for scanned PDFs (they're detected and rejected with a specific error), refresh-token rotation, per-user dollar metering, query persistence, and reranking / hybrid search / query rewriting — all held until evals can prove they help.
