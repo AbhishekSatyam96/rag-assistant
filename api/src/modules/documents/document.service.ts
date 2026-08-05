@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma.js";
 import { chunkPages, chunkText } from "../../lib/chunk.js";
 import { embed } from "../../lib/embed.js";
 import { HttpError } from "../../lib/http-error.js";
+import { DEFAULT_PAGE_SIZE } from "./document.schema.js";
 
 // The ingestion pipeline: take a document's raw text and turn it into
 // searchable, cite-able chunks. It ties together the two helpers you just
@@ -256,23 +257,95 @@ export type DocumentSummary = Prisma.DocumentGetPayload<{
   select: typeof documentSelect;
 }>;
 
-// Newest first — this is exactly the access pattern the composite index
+// A page of documents plus the cursor for the next one. `nextCursor` is null on
+// the last page, which is ALSO how a client knows to stop — so it never needs a
+// total count, and we never run the COUNT(*) that would produce one. (A total
+// is a second query against a table that changes under you, and its only real
+// consumer is a "page 3 of 7" control that a cursor API doesn't have.)
+export type DocumentPage = {
+  documents: DocumentSummary[];
+  nextCursor: string | null;
+};
+
+// Newest first — the access pattern the composite index
 // `@@index([userId, createdAt(sort: Desc)])` in schema.prisma exists to serve:
-// Postgres can seek straight to this user's slice and walk it already ordered,
-// with no sort step.
+// Postgres seeks straight to this user's slice and walks it already ordered.
 //
-// Takes an object rather than a bare string so pagination (`cursor`, `take`)
-// can be added later without changing every call site.
+// CURSOR, NOT OFFSET (`skip`/`take`). This list is ordered newest-first and new
+// documents arrive at the HEAD, so with offset pagination an upload between two
+// requests shifts every row down by one — and page 2 re-serves the last row of
+// page 1. Cursor pagination is anchored to a row, not to a count, so an insert
+// at the head cannot disturb a page boundary further down.
+//
+// THE ORDER MUST BE TOTAL, WHICH `createdAt` ALONE IS NOT. `createdAt` carries
+// no unique constraint, so two documents ingested in the same millisecond tie,
+// and Postgres is free to order a tie differently between two queries. At a
+// page boundary that means a row served twice or skipped entirely. Adding `id`
+// as a tie-break makes the order deterministic; `id` is a random v4 UUID and so
+// says nothing about time, but a tie-break only has to be STABLE, not
+// chronological.
+//
+// (The index doesn't cover the `id` leg, so Postgres sorts within a tie group.
+// Those groups are one or two rows, so extending the index buys nothing — and
+// it would cost a hand-authored migration, since `migrate dev` is unsafe on
+// this database. See the HNSW note in STATUS.md.)
 export async function listDocuments({
   userId,
+  limit = DEFAULT_PAGE_SIZE,
+  cursor,
 }: {
   userId: string;
-}): Promise<DocumentSummary[]> {
-  return prisma.document.findMany({
+  limit?: number;
+  cursor?: string;
+}): Promise<DocumentPage> {
+  // WHY THE CURSOR IS RESOLVED SEPARATELY INSTEAD OF HANDED STRAIGHT TO PRISMA.
+  //
+  // Verified empirically against the real database rather than assumed: when
+  // `cursor` names a row the `where` clause excludes — another user's document,
+  // or an id that exists nowhere — Prisma does NOT throw. It resolves to `[]`.
+  //
+  // That is good for security and bad for the user. Good, because the two cases
+  // are indistinguishable, so the response can't be used as an oracle to test
+  // whether a document id exists (the same reasoning that makes getDocument
+  // answer 404 rather than 403). Bad, because a client holding a stale cursor
+  // gets an empty page, and an empty page renders as "you have no documents" —
+  // a wrong and alarming answer to a request that should just work.
+  //
+  // So: resolve the cursor against THIS user first. Found, we paginate from it;
+  // not found, we fall back to the first page. Both failure cases still return
+  // byte-identical responses, so the oracle stays closed while the stale-cursor
+  // case quietly heals itself. Costs one primary-key lookup.
+  const cursorRow = cursor
+    ? await prisma.document.findFirst({
+        where: { id: cursor, userId },
+        select: { id: true },
+      })
+    : null;
+
+  // Ask for ONE more row than the caller wanted. If it comes back, there is at
+  // least one more document after this page — which is the entire "is there a
+  // next page" question, answered by the query we were already running instead
+  // of by a second COUNT(*).
+  const rows = await prisma.document.findMany({
     where: { userId },
-    orderBy: { createdAt: "desc" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     select: documentSelect,
+    take: limit + 1,
+    // `skip: 1` skips the cursor row ITSELF. Without it the row the client sent
+    // us comes back as the first item of the next page, so every page after the
+    // first opens with a duplicate of the one before it.
+    ...(cursorRow ? { cursor: { id: cursorRow.id }, skip: 1 } : {}),
   });
+
+  const hasMore = rows.length > limit;
+  // Drop the probe row before it reaches the client — it belongs to the next
+  // page, and returning it would make `limit` a lie by exactly one.
+  const documents = hasMore ? rows.slice(0, limit) : rows;
+
+  return {
+    documents,
+    nextCursor: hasMore ? documents[documents.length - 1].id : null,
+  };
 }
 
 export async function getDocument({

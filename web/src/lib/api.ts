@@ -249,8 +249,34 @@ async function uploadRequest<T>(path: string, form: FormData, token: string): Pr
   return data as T;
 }
 
-export function listDocuments(token: string): Promise<{ documents: DocumentSummary[] }> {
-  return request<{ documents: DocumentSummary[] }>("/documents", { token });
+// One page of documents. `nextCursor` is null on the last page, and that is the
+// ONLY signal to stop — the api deliberately sends no total count, because a
+// count is a second query against a table that changes under you and a cursor
+// API has no "page 3 of 7" control to spend it on.
+export type DocumentPage = {
+  documents: DocumentSummary[];
+  nextCursor: string | null;
+};
+
+// `cursor` is opaque: it is whatever the previous response's `nextCursor` said,
+// and the client never constructs or interprets one. Passing a stale cursor is
+// safe — the api resolves it against the caller's own documents and falls back
+// to the first page if it doesn't match, rather than answering with an empty
+// list that would render as "you have no documents".
+export function listDocuments(
+  token: string,
+  options: { limit?: number; cursor?: string } = {},
+): Promise<DocumentPage> {
+  // URLSearchParams rather than string concatenation. A cursor is a server-minted
+  // uuid today, so nothing needs escaping — but "nothing needs escaping" is a
+  // property of today's id format, not of the code, and the day it stops being
+  // true a hand-built query string breaks silently.
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.cursor) params.set("cursor", options.cursor);
+
+  const query = params.toString();
+  return request<DocumentPage>(`/documents${query ? `?${query}` : ""}`, { token });
 }
 
 // Returns the identical shape to createDocument's `document`, which is what

@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 
 import {
   createDocumentSchema,
+  listDocumentsQuerySchema,
   uploadDocumentSchema,
   CONTENT_MAX,
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
   TITLE_MAX,
 } from "./document.schema.js";
 
@@ -125,5 +128,76 @@ describe("uploadDocumentSchema", () => {
 
   it("accepts a request with no title field at all", () => {
     assert.equal(uploadDocumentSchema.safeParse({}).success, true);
+  });
+});
+
+describe("listDocumentsQuerySchema", () => {
+  // Everything here arrives from `req.query`, so every value is a STRING. These
+  // tests exist because the coercion needed to handle that is also what opens
+  // the door to `0` and `NaN` sneaking through as valid numbers.
+
+  it("defaults limit when the param is absent", () => {
+    assert.equal(listDocumentsQuerySchema.parse({}).limit, DEFAULT_PAGE_SIZE);
+  });
+
+  it("coerces a numeric string, because query params are never numbers", () => {
+    // A plain z.number() would reject "20" outright — this is the one field in
+    // the file that MUST coerce.
+    assert.equal(listDocumentsQuerySchema.parse({ limit: "20" }).limit, 20);
+  });
+
+  it("rejects limit=0 — Number('') is 0, so this is the `?limit=` case too", () => {
+    assert.equal(listDocumentsQuerySchema.safeParse({ limit: "0" }).success, false);
+  });
+
+  it("rejects a limit above the ceiling", () => {
+    // The ceiling is the whole point: without it `?limit=999999` reads a user's
+    // entire library in one request.
+    const result = listDocumentsQuerySchema.safeParse({
+      limit: String(MAX_PAGE_SIZE + 1),
+    });
+
+    assert.equal(result.success, false);
+  });
+
+  it("accepts a limit exactly at the ceiling", () => {
+    assert.equal(
+      listDocumentsQuerySchema.parse({ limit: String(MAX_PAGE_SIZE) }).limit,
+      MAX_PAGE_SIZE,
+    );
+  });
+
+  it("rejects a non-numeric limit, which coerces to NaN and not to a type error", () => {
+    // `typeof NaN === "number"`, so the type check PASSES here. `.int()` is what
+    // actually rejects it — remove it and `?limit=abc` becomes `take: NaN`.
+    assert.equal(listDocumentsQuerySchema.safeParse({ limit: "abc" }).success, false);
+  });
+
+  it("rejects a fractional limit", () => {
+    assert.equal(listDocumentsQuerySchema.safeParse({ limit: "2.5" }).success, false);
+  });
+
+  it("rejects a repeated limit param, which Express hands over as an array", () => {
+    // `?limit=1&limit=2`. Number(["1","2"]) is NaN, so this lands on the same
+    // guard as "abc" — a clean 400 rather than a surprise deeper in.
+    assert.equal(listDocumentsQuerySchema.safeParse({ limit: ["1", "2"] }).success, false);
+  });
+
+  it("treats an empty cursor as absent rather than invalid", () => {
+    // `?cursor=` MEANS "no cursor". Without the preprocess it would fail
+    // .min(1) and 400 a perfectly reasonable request for the first page.
+    assert.equal(listDocumentsQuerySchema.parse({ cursor: "" }).cursor, undefined);
+  });
+
+  it("passes a cursor through untouched — it is opaque to this layer", () => {
+    const id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+    assert.equal(listDocumentsQuerySchema.parse({ cursor: id }).cursor, id);
+  });
+
+  it("strips unknown query params", () => {
+    // Same free mass-assignment protection as the body schemas: a client that
+    // sends `?userId=someone-else` has it dropped before the service sees it.
+    const parsed = listDocumentsQuerySchema.parse({ userId: "attacker", limit: "5" });
+    assert.equal("userId" in parsed, false);
   });
 });

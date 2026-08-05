@@ -8,6 +8,7 @@ import {
   CONTENT_MAX,
   TITLE_MAX,
   createDocumentSchema,
+  listDocumentsQuerySchema,
   uploadDocumentSchema,
 } from "./document.schema.js";
 import * as documentService from "./document.service.js";
@@ -202,11 +203,26 @@ documentRouter.post("/", ingestLimiter, async (req, res) => {
   res.status(result.deduped ? 200 : 201).json({ document, deduped: result.deduped });
 });
 
+// Paginated, cursor-based. The response gained a `nextCursor` field rather than
+// changing shape, so a client written against the old `{ documents }` keeps
+// working and simply never paginates — which is what made this safe to add
+// after the frontend already shipped.
 documentRouter.get("/", async (req, res) => {
-  const documents = await documentService.listDocuments({
+  // `req.query`, not `req.body`: values arrive as strings (or as an ARRAY, if a
+  // key is repeated — `?limit=1&limit=2`), which is why the schema coerces.
+  // An array coerces to NaN and is rejected by `.int()`, so a repeated param is
+  // a clean 400 rather than a surprise.
+  const { limit, cursor } = listDocumentsQuerySchema.parse(req.query);
+
+  const page = await documentService.listDocuments({
     userId: currentUserId(req),
+    limit,
+    cursor,
   });
-  res.json({ documents });
+
+  // Spread the service's DocumentPage straight out rather than rebuilding it
+  // field by field, so the wire shape is declared in exactly one place.
+  res.json(page);
 });
 
 // No zod validation on `:id`, deliberately: an id that is malformed, an id that

@@ -1,6 +1,9 @@
 node_modules
-# Keep environment variables out of version control
-.env
+# Keep environment variables out of version control.
+# .env* rather than .env, so .env.local / .env.production can't slip in unnoticed.
+.env*
+# ...except .env.test, which is deliberately tracked and must hold only fake values.
+!.env.test
 
 /src/generated/prisma
 dist

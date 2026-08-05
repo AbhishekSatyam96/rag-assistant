@@ -75,3 +75,45 @@ export const uploadDocumentSchema = z.object({
 });
 
 export type UploadDocumentInput = z.infer<typeof uploadDocumentSchema>;
+
+// --- GET /documents pagination ----------------------------------------------
+
+// What a client gets when it asks for nothing, and the ceiling on what it may
+// ask for. THE CEILING IS THE LOAD-BEARING ONE: without it `?limit=999999` is a
+// free full-table read of a user's entire library, in a `select` that includes
+// `error` strings — the same class of problem CONTENT_MAX solves on the write
+// path, and the reason a default alone is not enough.
+export const DEFAULT_PAGE_SIZE = 20;
+export const MAX_PAGE_SIZE = 50;
+
+export const listDocumentsQuerySchema = z.object({
+  // `z.coerce`, unlike every other field in this file, because query-string
+  // values are ALWAYS strings: `?limit=20` arrives as "20" and a plain
+  // z.number() rejects it. Two coercion traps worth naming, because neither is
+  // caught by the type:
+  //   Number("")    === 0    -> `?limit=` would silently mean "zero documents"
+  //   Number("abc") === NaN  -> NaN IS a number, so typeof passes
+  // `.int()` and the bounds below are what actually reject both.
+  limit: z.coerce
+    .number()
+    .int("limit must be a whole number")
+    .min(1, "limit must be at least 1")
+    .max(MAX_PAGE_SIZE, `limit must be at most ${MAX_PAGE_SIZE}`)
+    .default(DEFAULT_PAGE_SIZE),
+
+  // The id of the last document on the previous page. Opaque to the client, and
+  // deliberately unvalidated beyond "non-empty" — for exactly the reason the
+  // `:id` param is unvalidated in document.routes.ts: a malformed cursor, a
+  // deleted one, and another user's all resolve to the same answer, so a format
+  // check would be the only branch that behaved differently, for no benefit.
+  //
+  // The preprocess mirrors uploadDocumentSchema's: `?cursor=` arrives as "",
+  // which MEANS "no cursor" but would fail `.min(1)` and 400 a request that is
+  // perfectly reasonable.
+  cursor: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().trim().min(1).optional(),
+  ),
+});
+
+export type ListDocumentsQuery = z.infer<typeof listDocumentsQuerySchema>;
