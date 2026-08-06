@@ -20,11 +20,13 @@ flowchart TD
         AR["auth.routes"]
         DR["document.routes"]
         QR["query.routes"]
+        CR["conversation.routes"]
     end
     subgraph services["services — orchestration"]
         AS["auth.service"]
         DS["document.service"]
         QS["query.service"]
+        CS["conversation.service"]
     end
     subgraph lib["lib — transport-free"]
         PD["pdf"]
@@ -32,8 +34,10 @@ flowchart TD
         EM["embed"]
         RE["retrieve"]
         AN["answer"]
+        CO["condense"]
         JW["jwt"]
         PW["password"]
+        NS["ndjson-stream<br/>⚠ knows HTTP"]
     end
     subgraph infra["infra"]
         PR["prisma"]
@@ -44,6 +48,9 @@ flowchart TD
     AR --> AS
     DR --> DS
     QR --> QS
+    CR --> CS
+    QR --> NS
+    CR --> NS
     DR --> PD
     AS --> JW
     AS --> PW
@@ -51,10 +58,16 @@ flowchart TD
     DS --> EM
     QS --> RE
     QS --> AN
+    CS --> RE
+    CS --> AN
+    CS --> CO
+    CS --> PR
+    AN --> CO
     RE --> EM
     CH --> EN
     EM --> OA
     AN --> OA
+    CO --> OA
     RE --> PR
     DS --> PR
     AS --> PR
@@ -66,7 +79,8 @@ flowchart TD
 | `services/` | orchestration, transactions | `express`, `res`, headers | `query.service` yields **events**, not HTTP |
 | `lib/` | one job each | HTTP, or each other's internals | No `express` import anywhere in `lib/` |
 
-**One arrow breaks the pattern, and it should be called out rather than smoothed over:**
+**Two arrows break the pattern, and both should be called out rather than smoothed over.**
+
 `document.routes → lib/pdf`. The upload route converts an HTTP artifact (a multipart buffer) into
 domain input (text + pages), which is defensible as transport-adaptation — the same category of
 work as zod-parsing a body. What is *less* defensible is that the route also joins the extracted
@@ -74,9 +88,25 @@ pages into `content`, and that join is part of the **dedupe contract**: `content
 hashed, so the separator must never change, yet it lives one layer away from `hashContent`. Logged
 in §10.
 
-**The load-bearing case is `query.service`.** It is an async generator yielding a typed
-`QueryEvent` union and never touches `res`. Swapping NDJSON for SSE or WebSockets means rewriting
-`query.routes.ts` only — the logic deciding *what an answer is* never reopens.
+`lib/ndjson-stream` imports `express` types, which the table above forbids. It is the deliberate
+exception and it is named as such in the filename: it holds the response-writing loop, the deferred
+headers and the disconnect-abort wiring shared by all three streaming routes. It moved out of
+`query.routes.ts` when the conversation router needed identical behaviour on two more endpoints,
+and it moved rather than being copied because the `headersSent` fork (§5.1) is the subtlest logic in
+the codebase — three copies means the next correction lands in one of them. The alternative,
+generalising the *routers* instead, would have coupled two modules that are allowed to diverge.
+
+**The load-bearing case is the answer services.** Both are async generators yielding typed event
+unions and neither touches `res`. Swapping NDJSON for SSE or WebSockets means rewriting
+`lib/ndjson-stream.ts` — the logic deciding *what an answer is* never reopens.
+
+**`conversation.service` is a sibling of `query.service`, not a superset.** It duplicates roughly
+ten lines of orchestration and shares every primitive that matters. Folding history, preset sources
+and persistence into `answerQuestion` would give one function three modes and, more importantly,
+would move the rewrite step upstream of the retrieval that the eval harness scores (HLD §4.0). The
+duplication is the cheaper of the two costs, and it is bounded — `Source`, `toSource` and the
+`QueryEvent` union are imported from `queries/`, not re-declared, so a new event type breaks the
+exhaustive `switch` in both clients.
 
 > **Frontend analogy:** `lib/` is a pure hook, `service/` is the container component holding
 > orchestration, `routes/` is the thin view that knows about the DOM. The generator is
@@ -128,6 +158,8 @@ Two smaller notes that cost real time to learn:
 erDiagram
     User ||--o{ Document : owns
     Document ||--o{ Chunk : "split into"
+    User ||--o{ Conversation : owns
+    Conversation ||--o{ Message : contains
 
     User {
         string id PK "uuid"
@@ -158,7 +190,28 @@ erDiagram
         vector embedding "vector(1536), nullable"
         datetime createdAt
     }
+    Conversation {
+        string id PK "uuid"
+        string userId FK
+        string title "max 80 — derived from the first question"
+        datetime createdAt
+        datetime updatedAt "bumped per turn — orders the list by activity"
+    }
+    Message {
+        string id PK "uuid"
+        string conversationId FK
+        enum role "USER ASSISTANT"
+        string content
+        json sources "nullable — Source[] snapshot, ASSISTANT rows only"
+        int seq "1-based position within the thread"
+        datetime createdAt
+    }
 ```
+
+**Note the absent relationship.** `Message` has no edge to `Chunk`, and that is the modelling
+decision worth defending in this diagram. See HLD §5: chunks are recreated on every re-ingest, so a
+foreign key makes old citations vanish or dangle, while a citation is a claim about what the answer
+was built from *at the time it was given*. The `sources` JSON column is that claim, copied.
 
 ### Indexes and the reason each exists
 
@@ -169,6 +222,8 @@ erDiagram
 | `Document @@index([userId, createdAt DESC])` | `listDocuments` | Composite, sorted: Postgres seeks to the user's slice and walks it already ordered — no sort step |
 | `Chunk @@index([documentId])` | Cascade delete, per-doc lookup | — |
 | `Chunk_embedding_hnsw_idx` | ANN search | Hand-written SQL. `USING hnsw (embedding vector_cosine_ops) WITH (m=16, ef_construction=64)` |
+| `Conversation @@index([userId, updatedAt DESC])` | `listConversations` | Same composite-sorted shape as the document list: seek to the user's slice, walk it already ordered, no sort step |
+| `Message @@unique([conversationId, seq])` | Transcript ordering **and** the append race | Does two jobs, which is why there is no separate `@@index([conversationId])` — a unique index is still an index (§6) |
 
 ### Invariants
 
@@ -180,6 +235,15 @@ erDiagram
    explicitly (§5.2).
 4. **A `READY` document has `chunkCount` rows in `Chunk`, all with non-NULL embeddings.**
    🟡 Currently unenforced after a crash — see §4.
+5. **`Message.seq` is dense and 1-based within a conversation**, and a turn writes the question at
+   `seq` and its answer at `seq + 1`.
+6. **A `USER` message is not guaranteed to be followed by an `ASSISTANT` one.** A turn aborted
+   before the first token persists the question and no answer, deliberately (§5.4). The transcript
+   shows it as an unanswered question; `toHistory` drops it before building a prompt, because two
+   consecutive user messages is a shape no model API handles gracefully. **Transcript and prompt
+   are different projections of the same rows, and this is the line between them.**
+7. **`Message.sources` is non-empty only on `ASSISTANT` rows**, and is a snapshot, never a live
+   reference.
 
 ### The `Unsupported("vector(1536)")` consequence chain
 
@@ -449,6 +513,8 @@ caller re-derives it (and gets it backwards in a template).
 ```
 system: 6 numbered rules — answer only from sources, never from training data,
         cite inline, emit REFUSAL verbatim when insufficient, don't speculate, be concise
+        + 3 more rules, appended ONLY when history is present (§5.4)
+[history: recent turns, citation-stripped, assistant answers truncated — chat only]
 user:   Sources:\n\n[1] (from "Title", chunk 0)\n<text>\n\n---\n\n[2] ...
         \n\n---\n\nQuestion: <question>
 ```
@@ -460,6 +526,92 @@ user:   Sources:\n\n[1] (from "Title", chunk 0)\n<text>\n\n---\n\n[2] ...
 | `temperature: 0` | Grounded QA, not writing. Also makes evals meaningful: under a non-deterministic model, a regression is indistinguishable from noise. |
 | Fixed `REFUSAL` constant | A model left to its judgement writes a different apology every time, and a waffle is indistinguishable from a weak answer. A verbatim string is UI-detectable and eval-assertable. |
 | Short-circuit on 0 chunks | The model cannot answer from empty context — asking is a guaranteed refusal that costs a round-trip and real money. Emitting the same constant keeps both paths indistinguishable to the client. |
+| Multi-turn rules **appended**, never edited in | `SYSTEM_PROMPT` is the exact string the eval harness scores. Editing it to mention conversations would move every number the harness produces, and the shift would be indistinguishable from a retrieval regression. Single-turn requests to OpenAI are byte-identical to what they were before chat existed. |
+
+### 5.4 The chat turn — what differs
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant R as conversation.routes
+    participant S as conversation.service
+    participant CO as lib/condense
+    participant RE as lib/retrieve
+    participant AN as lib/answer
+    participant DB as Postgres
+
+    C->>R: POST /conversations/:id/messages
+    R->>S: continueConversation(…) — generator, not yet run
+    S->>DB: findFirst conversation WHERE id AND userId
+    Note over S,DB: 404 here still gets a real status —<br/>nothing has been yielded yet
+    S->>DB: load messages ORDER BY seq
+    S->>DB: INSERT user message at seq+1 (+ bump updatedAt)
+    S-->>R: yield conversation  ← headers commit HERE
+    S->>CO: condense(history, question)
+    alt reformat instruction
+        CO-->>S: {kind:"reuse"}
+        Note over S: no embedding, no SQL —<br/>re-use the previous turn's sources
+    else needs a search
+        CO-->>S: {kind:"search", question, rewritten}
+        S->>RE: retrieveChunks(rewritten question)
+        RE->>DB: ANN search, tenant-scoped
+    end
+    S-->>R: yield search, then sources
+    S->>AN: streamAnswer(ORIGINAL question, chunks, history)
+    loop tokens
+        AN-->>S: delta
+        S-->>R: yield token
+    end
+    S-->>R: yield done
+    Note over S,DB: finally: INSERT assistant message at seq+2<br/>— runs on abort too
+```
+
+Four things in that diagram are decisions rather than mechanics.
+
+**The first yield is placed after two writes, on purpose.** By the time `conversation` is emitted,
+a conversation row and a message row exist — so a later failure cannot be a clean HTTP status
+(§5.1), and a retrieval error becomes an in-band `error` event on a `200`. That is a real cost,
+accepted for a specific reason: failing with a `500` and no id would leave the client unaware of
+persisted state it owns, holding a thread with a question in it and no way to navigate there.
+Telling the client about a resource that genuinely exists is the honest move, and the `error` event
+was built for the failures that follow. Ownership resolution deliberately happens *before* the
+yield, which is why `404` still works.
+
+**The rewrite drives retrieval; the original question drives generation.** `streamAnswer` receives
+the user's literal words, never the rewritten query. Answering the rewrite would turn "make that
+shorter" into a re-answer of a question nobody asked.
+
+**The re-use branch runs no embedding call and no SQL.** `Source` structurally satisfies
+`ContextChunk` — the narrow type `answer.ts` actually needs — so stored citations pass straight
+back in as context with no adapter and no synthetic `chunkId`/`distance` invented to satisfy a
+type. Narrow the input, widen the callers.
+
+**The assistant write is in a `finally`.** When the user hits Stop, `for await` calls `.return()`
+on the generator, which runs `finally` and nothing else — a plain save after the loop would never
+execute, and the thread would hold a question whose answer was discarded. The partial is kept, as
+ChatGPT does. The write is `.catch`-wrapped because an exception raised *inside* a `finally`
+replaces whatever was propagating, so a database hiccup during cleanup would erase the real error,
+including the abort that got there.
+
+#### The citation-stripping trap, and why it is worth reading twice
+
+Historical assistant answers are stripped of their `[n]` markers before entering a prompt, because
+turn 1's `[2]` and turn 3's `[2]` were numbered against different retrievals — replaying them
+invites the model to reuse a numbering that no longer means anything.
+
+On a **re-use** turn that reasoning inverts: the sources being sent *are* the previous turn's, so
+those markers are still valid, and stripping them is simply wrong.
+
+It was also actively harmful, which is how it was found. Observed live: the model was shown its own
+previous answer with every citation removed, asked to reproduce it more briefly — and copied what
+it saw, dropping the markers. A system-prompt rule explicitly requiring citations on reformat
+requests was added and **lost to the example directly above it**. The fix is
+`trimHistory(history, keepLastCitations)`, true only on re-use and only for the final message.
+
+The general lesson, which outlives this codebase: **a demonstration in the context window beats an
+instruction in the system prompt.** If the model is doing something a rule forbids, check what the
+prompt is *showing* it before adding another rule.
 
 ---
 
@@ -490,6 +642,26 @@ provides it — built for a different reason, correct for this one.
 > and re-insert chunks. **The job handler must therefore be idempotent on `documentId`:** check
 > `status === 'READY'` and no-op, or delete existing chunks before re-inserting.
 
+### Concurrent appends to one conversation ✅
+
+The same shape as the dedupe race above, and solved the same way: **the database decides, not the
+application.**
+
+A turn computes its position by reading the thread's last `seq` and adding one. Two browser tabs
+posting into the same thread both read `seq = 4` and both try to write `seq = 5`. Without a
+constraint both succeed, and the transcript silently interleaves two conversations into one
+unreadable thread — a corruption with no error attached to it, which is the worst kind.
+
+`@@unique([conversationId, seq])` makes the second writer lose with `P2002`, which the service maps
+to a **`409`** rather than a `500`: nothing is broken, the client's view is stale, and a refetch
+then a retry succeeds. The message says so.
+
+Two properties worth naming. First, the constraint is doing *ordering* work as well as *race* work,
+which is why there is no separate index on `conversationId`. Second, the check-then-write is
+deliberately optimistic — serialising every append behind a `SELECT … FOR UPDATE` would be correct
+and would also make the common case (one user, one tab) pay for a case that essentially never
+happens.
+
 ### Connection pooling ✅
 
 `SET LOCAL` inside a transaction is the only safe way to tune a pooled connection. This is the
@@ -498,9 +670,17 @@ single `SELECT`.
 
 ### Client disconnect ✅
 
-`res.on("close") → abort()` propagates through `answerQuestion` → `streamAnswer` → the OpenAI SDK's
-`signal`. Without it, a closed tab leaves tokens streaming into a dead socket, billed in full.
+`res.on("close") → abort()` propagates through the answer service → `streamAnswer` → the OpenAI
+SDK's `signal`. Without it, a closed tab leaves tokens streaming into a dead socket, billed in full.
 Verified: an abort leaves no unhandled rejection.
+
+On the chat path an abort has a second obligation: **the partial answer must still be persisted.**
+`for await` calls `.return()` on the generator when the consumer stops, which runs `finally` and
+nothing else — so the write lives there rather than after the loop. Discarding it would leave the
+thread holding a question whose answer was thrown away, and the next turn would then hand the model
+two consecutive user messages. `condense` is the one place an abort is deliberately re-thrown rather
+than swallowed: every *other* failure there falls back to the raw question, but continuing after a
+disconnect would mean paying for retrieval and generation nobody will read.
 
 ---
 
@@ -514,9 +694,14 @@ Verified: an abort leaves no unhandled rejection.
 | `GET` | `/me` | ✅ | `200 {user}` | `401` |
 | `POST` | `/documents` | ✅ | `201 {document, deduped:false}` · `200 {…, deduped:true}` | `400` · `401` · `413` · `429` · `500` |
 | `POST` | `/documents/upload` | ✅ | *identical shape* — `201` / `200 {…, deduped:true}` | `400` not-a-PDF, corrupt, password-protected, no file, wrong field, text over 200k · `401` · `413` >4 MB · **`422`** parsed but no extractable text · `429` · `500` |
-| `GET` | `/documents` | ✅ | `200 {documents: Summary[]}` | `401` |
+| `GET` | `/documents` | ✅ | `200 {documents: Summary[], nextCursor}` | `401` |
 | `GET` | `/documents/:id` | ✅ | `200 {document}` | `401` · **`404`** |
-| `POST` | `/queries` | ✅ | `200` NDJSON stream | `400` · `401` · `500` before headers; in-band `error` after |
+| `POST` | `/queries` | ✅ | `200` NDJSON stream | `400` · `401` · `429` · `500` before headers; in-band `error` after |
+| `POST` | `/conversations` | ✅ | `200` NDJSON stream — starts a thread | `400` · `401` · `429` · `500` before headers; in-band `error` after |
+| `POST` | `/conversations/:id/messages` | ✅ | `200` NDJSON stream — continues one | `400` · `401` · **`404`** · **`409`** · `429` · `500` |
+| `GET` | `/conversations` | ✅ | `200 {conversations, nextCursor}` | `400` bad `limit` · `401` |
+| `GET` | `/conversations/:id` | ✅ | `200 {conversation}` incl. `messages[]` | `401` · **`404`** |
+| `DELETE` | `/conversations/:id` | ✅ | **`204`** | `401` · **`404`** |
 
 ### Status-code decisions
 
@@ -529,6 +714,12 @@ Verified: an abort leaves no unhandled rejection.
 | **`422`, not `400`**, for a scanned PDF | The request was well-formed *and* the file parsed cleanly — there is simply nothing in it to index. A `400` would send the user looking for a malformed file. The message names the actual cause ("this looks like a scanned PDF") because "empty document" describes the symptom, not the fix. |
 | **`413`, not `400`**, for an oversized file | Semantically the payload-too-large case. Required its own `MulterError` branch in the error middleware: multer's error carries `code` but *not* the `type`/`status` pair the body-parser branch sniffs for, so before that branch existed a 12 MB upload returned `500 Internal Server Error` — wrong status, and it tells the user nothing they can act on. |
 | Upload returns the **same body shape** as the JSON route | Lets the client keep one `DocumentSummary` type, one renderer, and one polling loop across both ingestion routes. The cost is one extra `SELECT` per upload; the saving is an entire duplicated code path in the UI. |
+| `POST /conversations` answers **`200`, not `201`** | The status is committed before the work happens (§5.1), so `201 Created` cannot be conditional on anything. The `conversation` event carries the new id instead — which the client needs anyway, to correct the URL. |
+| Starting a thread and answering its first question are **one request** | The alternative is `POST` then `POST`, which costs a round trip before the user sees anything and leaves empty conversations behind whenever the second call never arrives. A thread with no question in it is not worth representing. |
+| Thread id is a **path parameter**, never a body field | Identity, not payload. A body that can disagree with the path is a bug waiting to be written. |
+| **`409`** when two tabs append to one thread | The `@@unique([conversationId, seq])` violation surfaces as `P2002` and becomes a `409`, not a `500`: nothing is broken, the client's view of the thread is simply stale, and a refetch then a retry works. Without the constraint both writes succeed and two conversations silently interleave into one unreadable transcript. |
+| **`204`**, not `200`, for delete | The resource is gone; returning the deleted object invites a client to render something the server just destroyed. `deleteMany` is used rather than `delete` so "not mine" and "does not exist" both come back as a count of zero → the same `404`. |
+| Rate limiters on the two chat **POSTs**, not at the mount point | Unlike `/queries`, this router mixes expensive writes with cheap reads. Budgeting `GET /conversations` against a daily *answer* limit would lock a user out of transcripts they have already paid for. |
 
 ### The `/queries` NDJSON stream
 
@@ -551,6 +742,25 @@ UX silently disappears **in production and only in production**.
 `done` carries the fully assembled answer so a client that buffered nothing (a test, a `curl` pipe)
 still gets complete text, and so "the stream ended" is distinguishable from "the connection
 dropped."
+
+**The chat stream is the same four events plus two**, reusing the union rather than redeclaring it,
+so a new event type breaks the exhaustive `switch` in both clients:
+
+```jsonc
+{"type":"conversation","conversationId":"…","title":"What does the handbook say…","messageId":"…"}
+{"type":"search","query":"What is the duration of parental leave?","rewritten":true,"reused":false}
+// …then sources / token / done / error exactly as above
+```
+
+`conversation` arrives first because the client needs the id to correct its URL, and it does so with
+`history.replaceState` rather than a router navigation — a real navigation would unmount the
+component and kill the stream in flight.
+
+`search` exists so the rewrite is visible rather than magic. "How long is it?" quietly becoming
+"What is the duration of parental leave?" is the most surprising thing the system does, and a bad
+rewrite and bad retrieval look identical from the outside while having completely different fixes.
+`reused: true` means no search ran at all. ⚠️ **Not persisted** — it is a property of the turn, not
+of the stored message, so it is gone on reload. Logged in §10.
 
 `page` is `number | null` — a real page for chunks that came from a PDF, `null` for every
 pasted-text document and `null` **permanently**, not "not yet". The client must therefore render a
@@ -636,10 +846,13 @@ Real ones, from the code — not a list assembled to look longer.
 | Page-join lives in the route, not the service | Low — but it is part of the dedupe contract (§1) | Move extraction + join into a `ingestPdfDocument` service function; the route goes back to being thin |
 | Uploaded file bytes are discarded | Low — deliberate (HLD §5), but re-processing cannot recover text a parser missed | Only matters if OCR or a better parser enters scope |
 | `Math.sumPrecise` shim in `lib/pdf.ts` | Low — pdf.js calls a TC39 Stage 3 method absent from Node 24's V8 | Delete on Node 25+. Guarded, so it self-disables. |
-| Answers are discarded | Medium — blocks history, caching, scoring | `Query` table |
+| No tests for the conversations module 🟡 | **High** — the newest and least exercised code in the repo. `condense`'s fallback guards, `toHistory`'s orphan-dropping and `titleFromQuestion` are pure functions and belong in the unit tier today; the persistence path, the `seq` race and the abort-writes-a-partial behaviour need the integration tier below. Verified by hand against a real database and a real model, which is not the same thing | Unit tests now, integration tier with the rest |
+| The rewritten query is not persisted | Low — shown live via the `search` event, lost on reload, so a returning user cannot see why a turn retrieved what it did | A nullable column on `Message`; deferred as a second migration for a debugging affordance |
+| Rewrite quality is unmeasured | Medium — a rewrite that loses intent produces confident retrieval of the wrong passage, which reads exactly like a retrieval regression | hit-rate@k on rewritten vs. raw follow-up over a multi-turn set (HLD §11) |
+| Answers from `/queries` are still discarded | Low — chat persists its own; the single-turn path deliberately does not, and the eval harness collects the generator directly rather than reading rows | Nothing planned |
 | Token in `localStorage` 🟡 | Medium — XSS-readable | httpOnly cookies (forces the stream off Bearer) |
 | No refresh token, 1h expiry 🟡 | Medium | Refresh + rotation |
 | No `helmet` | Medium — rate limiting is done (Redis-backed, `middleware/rate-limit.ts`); security headers are not | Deferred hardening |
 | Concurrency cap is per-instance | Low — the limiters moved to Redis, the `Map` deliberately did not, so "2 streams per user" reads as "2 per instance" behind an autoscaler | Nothing: it counts sockets this process owns, and the per-user cost bound now belongs to the Redis limiters |
-| `listDocuments` unpaginated | Low — signature already takes an object | Cursor pagination |
+| Conversation list has no "load more" in the UI | Low — the api is cursor-paginated and the client fetches only the first page on `/chat` | Wire the cursor through, as `/documents` already does |
 | Answers rendered as preformatted text | Low — model emits markdown | Render + sanitise (text derives from user documents) |

@@ -52,8 +52,17 @@ the JWT payload's *claims about identity* (verified, not trusted-as-sent), and e
 Everything to the right is trusted infrastructure reached over authenticated connections.
 
 The single most important consequence: **`userId` is only ever read from a verified token**, never
-from a request body. Both `createDocumentSchema` and `askSchema` deliberately omit it, so there is
-no field a client could set to act as another user.
+from a request body. `createDocumentSchema`, `askSchema` and the conversation schemas all
+deliberately omit it, so there is no field a client could set to act as another user.
+
+**Conversation history obeys the same rule, and it is worth stating separately because the
+temptation is stronger.** The obvious multi-turn design has the browser post its own transcript —
+it already has one on screen, and the server then holds no state. It is also the design that hands
+a caller the ability to fabricate an *assistant* turn, which lands in the slot of the prompt a model
+weights most heavily. History is therefore loaded server-side from `Message` rows scoped to the
+caller, and `continueConversationSchema` accepts a question and nothing else. The thread id is a
+path parameter rather than a body field for a smaller version of the same reason: a body that can
+disagree with a path is a bug waiting to be written.
 
 ### External dependencies
 
@@ -154,7 +163,7 @@ most common architectural mistake in this class of app.
 
 | | Write path — ingestion | Read path — query |
 |---|---|---|
-| **Trigger** | `POST /documents` (JSON) · `POST /documents/upload` (multipart PDF) | `POST /queries` |
+| **Trigger** | `POST /documents` (JSON) · `POST /documents/upload` (multipart PDF) | `POST /queries` · `POST /conversations[/:id/messages]` |
 | **Slow because** | N embedding round-trips, unbounded in N | one LLM generating tokens |
 | **Cost scales with** | document length | context size + answer length |
 | **Is anyone waiting?** | No — the user can navigate away | **Yes, a human, right now** |
@@ -164,6 +173,31 @@ most common architectural mistake in this class of app.
 
 The asymmetry is the design, not an inconsistency. **Slow-and-deferrable → queue.
 Slow-and-user-waiting → stream.**
+
+### 4.0 Two read surfaces, one engine ✅
+
+The read path has two entry points, and the split is deliberate rather than transitional.
+
+| | `/queries` — single turn | `/conversations` — multi turn |
+|---|---|---|
+| **State** | none; nothing is persisted | `Conversation` + `Message` rows |
+| **Before retrieval** | embed the question as typed | rewrite it against the thread's history first |
+| **May skip retrieval** | no | yes — a reformat instruction re-grounds on the previous turn's sources |
+| **Prompt** | system + one user message | system + conversation rules + recent turns + one user message |
+| **Scored by the eval harness** | ✅ yes | ⬜ not yet |
+
+They share `retrieveChunks`, `streamAnswer` and the NDJSON writer; only orchestration differs.
+
+**Why not merge them.** The rewrite step sits *upstream of retrieval*, so folding it into `/queries`
+would make hit-rate@k measure "rewrite + retrieval" while still being read as "retrieval" — and
+when the graph moved there would be no way to tell which half did it. Keeping the single-turn path
+byte-for-byte unchanged, down to the system prompt string, is what keeps the measurement
+attributable. The multi-turn rules are *appended* to that prompt rather than edited into it, for
+exactly this reason.
+
+**What it costs.** Two surfaces answering questions about the same documents is a product question
+as much as an architectural one, and the honest framing is that `/ask` is the instrumented path and
+`/chat` is the product. That is defensible only for as long as it stays true.
 
 ### 4.1 The known gap in the write path 🟡
 
@@ -200,6 +234,8 @@ Neon Postgres
 ├── User            identity, argon2id password hash
 ├── Document        raw text (source of truth for re-processing), status, contentHash
 ├── Chunk           chunk text + vector(1536) + HNSW index
+├── Conversation    a chat thread; title, updatedAt (orders the list by activity)
+├── Message         role, content, seq, and a JSON snapshot of the answer's citations
 └── (target) job queue — pg-boss tables, same database
 ```
 
@@ -227,6 +263,22 @@ on every single retrieval, both to fetch the citation title *and* to enforce the
 dedicated vector store would split that join across two systems and force tenant isolation into
 metadata filters that no database constraint backs. Keeping vectors in Postgres means ownership
 stays enforceable in a `WHERE` clause. The trade is that pgvector's ceiling is lower — see §7.
+
+**Why citations are copied onto `Message` instead of referencing `Chunk`.** The normalised design
+is a join table from message to chunk, and it is wrong here. `Chunk` rows are deleted with their
+document and recreated with fresh ids on every re-ingest — and §5 already commits to re-chunking as
+a first-class operation, so that is the *expected* path, not an edge case. A foreign key would make
+old answers silently lose their citations under `onDelete: Cascade`, or dangle under `SetNull`.
+
+The resolution comes from asking what a citation actually asserts. It is not "this answer points at
+row `abc123`"; it is **"this answer was built from this passage, at the time it was given"** — a
+historical claim, and historical claims are stored as copies. So `Message.sources` holds the same
+JSON the client received.
+
+Two costs, both real and both accepted: chunk text is duplicated once per citation, and "which
+passages get cited most" stops being a join and becomes a scan. At this corpus size neither
+matters; at the scale in §8 the second one is the argument for a derived analytics table, not for
+reverting the decision.
 
 **Why the `embedding` column is `Unsupported("vector(1536)")`:** Prisma has no model of pgvector.
 This one fact drives three downstream consequences documented in the LLD — the two-step write,
@@ -309,8 +361,12 @@ These are not estimates. Each is a constant with a rationale.
 | Uploaded PDF pages | 200 | `lib/pdf.ts` | Page count, not byte count, drives extraction cost — a 2 MB file can hold thousands of pages, so the size cap alone bounds nothing |
 | Document title | 200 chars | `createDocumentSchema` | Optional on the upload route, where it defaults to the sanitised filename |
 | Document content | 200,000 chars | `createDocumentSchema` + upload route | Deliberately below the 1 MB body cap. Enforced a second time in the upload route because extracted text never passes through a body schema. **Rejected, never truncated** — a silently half-ingested document answers "not in your documents" for everything past the cut |
-| Question length | 1,000 chars | `askSchema` | Far above a real question, far below the embedder's 8,191-token input cap |
-| `k` (chunks retrieved) | 1–10, default 5 | `askSchema` | Feeds straight into the prompt; uncapped `k` is a way for a client to force an arbitrarily expensive request |
+| Question length | 1,000 chars | `askSchema`, conversation schemas | Far above a real question, far below the embedder's 8,191-token input cap |
+| `k` (chunks retrieved) | 1–10, default 5 | `askSchema`, conversation schemas | Feeds straight into the prompt; uncapped `k` is a way for a client to force an arbitrarily expensive request |
+| History window | 6 messages | `lib/condense.ts` | Three exchanges — enough to resolve "it" / "the second one", and fixed, so prompt cost does not grow with thread length |
+| Assistant turn in history | 500 chars | `lib/condense.ts` | The rewriter needs to know what "that" referred to, not the whole essay. Untruncated answers are by far the largest thing that would enter this prompt |
+| Rewrite output | 100 tokens generated, 400 chars accepted | `lib/condense.ts` | A rewritten question is a question. Anything longer means the model started *answering* — a known small-model failure on rewrite tasks — so the output is discarded and the raw question used |
+| Conversation title | 80 chars | `conversation.schema.ts` | Derived from the first question, never client-supplied and never model-generated |
 | Chunk size / overlap | 1,000 / 200 chars | `lib/chunk.ts` | ⚠️ **Chosen by judgement. Unvalidated.** M7 exists to settle this. |
 | Embedding batch | 100 inputs/call | `lib/embed.ts` | API cap |
 | Vector dimensions | 1,536 | `text-embedding-3-small` | Must match the `vector(1536)` column |
@@ -466,6 +522,14 @@ is also written into the code it governs, next to the thing it explains.
 | No distance threshold on retrieval | Cutoff on similarity | Semantic search always returns *something*; a threshold is a magic number tuned by vibes. The **prompt** does the refusing — verified: an off-corpus question retrieves at similarity 0.33 and still returns the exact refusal string. |
 | Fixed `REFUSAL` constant | "Say you don't know" | Left to its judgement the model writes a different apology each time, and a waffle is indistinguishable from a weak answer. A verbatim string is detectable by the UI and assertable by an eval. |
 | `temperature: 0` | Any creativity | Grounded QA, not writing. Also makes M7 meaningful — under a non-deterministic model a regression is indistinguishable from noise. |
+| Chat as a sibling module, `/queries` untouched | Teach `/queries` about history | The rewrite step sits upstream of retrieval, so merging them makes hit-rate@k measure two things at once and attribute a regression to neither (§4.0). |
+| History persisted server-side | Client posts its own transcript | A client-supplied transcript can fabricate an *assistant* turn — the slot the model trusts most. Same rule as `userId` (§2). |
+| Citations snapshotted onto `Message` | Foreign key to `Chunk` | Chunks are recreated on every re-ingest; a reference makes old citations vanish or dangle. A citation is a claim about the past (§5). |
+| Rewrite drives *retrieval*; the original question drives *generation* | Answer the rewritten query | "Make that shorter" is nonsense as a search query and perfectly clear as an instruction. Answering the rewrite re-answers a question nobody asked. |
+| A `NO_SEARCH` sentinel for reformat instructions | Always retrieve | Searching for "make it shorter" returns the corpus's least relevant chunks and the grounded prompt then correctly refuses — a correct system producing a broken-looking product. |
+| Every rewrite failure falls back to the raw question | Fail the request | Condensing is a quality improvement; without it the behaviour is exactly what the app did before chat existed. Degrading to "search for what the user typed" is always safe. |
+| One shared concurrency counter across both answer routes | One `limitConcurrent(2)` per mount | The counter is closed over per call, so three instances of "max 2" is a max of 6. The resource being protected is shared, so the counter must be. |
+| `seq` on `Message`, not `createdAt` ordering | Order by timestamp | A question and its answer are frequently written in the same millisecond, and a timestamp gives them no defined order — rendering the answer above the question. The unique index then also serialises two tabs appending to one thread. |
 
 ---
 
@@ -475,9 +539,10 @@ is also written into the code it governs, next to the thing it explains.
 |---|---|---|
 | M1–M6 | DB · auth · ingestion · documents UI · retrieval · streamed answers | ✅ |
 | PDF upload | Multipart route · pdf.js extraction · page-aware chunking · page-level citations | ✅ |
-| **M7 — evals** | Test runner + 42 tests ✅ · reproducible corpus ✅ · golden question set ⬜ · hit-rate@k / MRR ⬜ · groundedness ⬜ · refusal accuracy ⬜ · **per-page vs. whole-document chunking** 🟡 measured, not yet scored | 🟡 **in progress** |
+| **M7 — evals** | Test runner + unit/HTTP tier ✅ · reproducible corpus ✅ · golden question set ⬜ · hit-rate@k / MRR ⬜ · groundedness ⬜ · refusal accuracy ⬜ · **per-page vs. whole-document chunking** 🟡 measured, not yet scored · **rewrite quality** ⬜ new, see M10 | 🟡 **in progress** |
 | M8 — async write path | pg-boss · worker service · retry · `202 Accepted` · reprocess job | ⬜ |
 | M9 — deployment | **Vercel × 2** (web + API as a function), custom subdomains, Redis-backed limits | ✅ **2026-07-27** |
+| M10 — conversations | `Conversation`/`Message` · history-aware rewrite · `NO_SEARCH` re-use path · `/chat` thread UI · per-message citation snapshots | ✅ **2026-08-06**, unit-tested ⬜ |
 | Hardening | ~~Rate limiting~~ ✅ (Redis-backed) · ~~automated tests~~ ✅ (unit + HTTP tier) · refresh tokens · helmet · httpOnly cookies | 🟡 partial |
 
 **M9 landed before M7, and not on the planned infrastructure.** Cloud Run was dropped rather than
@@ -499,7 +564,7 @@ densities, which holds the text constant and varies only how much of it lands on
 2,150 chars/page the split behaves normally — median chunk ~950 characters, about 5% of chunks under
 300. At roughly 330 chars/page it collapses: **the chars-per-page and chars-per-chunk distributions
 come out identical**, meaning every page produced exactly one chunk and `chunkSize: 1000` was never
-consulted. Median chunk size falls to ~330 and roughly 38% land under 300 characters.
+consulted. Median chunk size falls to ~330 and more than a third land under 300 characters.
 
 That is the mechanism, reproduced on demand rather than argued for.
 
@@ -529,3 +594,22 @@ An earlier draft of this section claimed query persistence "stops being optional
 score what you threw away." That was wrong, and the reasoning is worth keeping: the harness calls
 `answerQuestion` directly and collects the generator, so the answer never has to survive a request
 to be scored. Persistence buys history, caching and dollar metering. It buys evals nothing.
+
+**M10 landed before M7 finished, and it added work to M7 rather than removing any.** Conversations
+needed persistence for history, which settled the open question above from the product side rather
+than the measurement side — the note stands: it was never an eval prerequisite.
+
+What M10 *did* change is the scope of what has to be measured. The rewrite step is a new component
+sitting upstream of retrieval, with its own failure mode: a rewrite that loses the user's intent
+produces confident retrieval of the wrong passage, which looks exactly like a retrieval regression.
+The single-turn golden set is unaffected — `/queries` is untouched and turn one skips the rewriter
+entirely — but the rewriter itself is unevaluated. The measurement that justifies it is hit-rate@k
+on the rewritten query versus hit-rate@k on the raw follow-up, over a small set of multi-turn cases;
+that delta is the entire argument for the extra call and the extra latency, and it does not exist
+yet.
+
+The ordering was a judgement call and worth naming as one. Building the feature first means the
+harness must now separate two things that were one thing when it was specified. Building the harness
+first would have delayed a feature that makes the app demonstrable. Neither is free; the cost of the
+choice made is that **no claim about chat quality is currently backed by a number**, and the README
+says so.

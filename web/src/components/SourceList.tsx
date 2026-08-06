@@ -23,9 +23,17 @@ type SourceListProps = {
   // itself. Controlled from the page rather than held here, because the trigger
   // lives in a sibling component.
   focused: number | null;
+  // Namespaces the DOM ids the citation chips scroll to.
+  //
+  // Needed because a chat thread renders MANY source lists on one page, each
+  // numbered from 1 — every turn retrieves its own chunks and numbers them
+  // independently. Without a prefix, five turns all define `#source-1` and every
+  // citation in the thread scrolls to the first answer's first source. `/ask`
+  // shows one list at a time and keeps the default.
+  idPrefix?: string;
 };
 
-export function SourceList({ sources, focused }: SourceListProps) {
+export function SourceList({ sources, focused, idPrefix = "source" }: SourceListProps) {
   if (sources.length === 0) return null;
 
   return (
@@ -39,14 +47,26 @@ export function SourceList({ sources, focused }: SourceListProps) {
           // search" rather than "the layout jumped".
           style={{ animationDelay: `${i * 40}ms` }}
         >
-          <SourceCard source={source} focused={focused === source.n} />
+          <SourceCard
+            source={source}
+            focused={focused === source.n}
+            domId={`${idPrefix}-${source.n}`}
+          />
         </li>
       ))}
     </ul>
   );
 }
 
-function SourceCard({ source, focused }: { source: Source; focused: boolean }) {
+function SourceCard({
+  source,
+  focused,
+  domId,
+}: {
+  source: Source;
+  focused: boolean;
+  domId: string;
+}) {
   const [expanded, setExpanded] = useState(false);
 
   // Collapsed by default: a chunk is up to ~1000 characters, and five of them
@@ -57,9 +77,10 @@ function SourceCard({ source, focused }: { source: Source; focused: boolean }) {
 
   return (
     <div
-      // `id` is what the citation chip scrolls to — see the page's
-      // onCitationClick. Derived from `n` so the two sides agree by construction.
-      id={`source-${source.n}`}
+      // What the citation chip scrolls to — see the page's onCitationClick.
+      // Built from the same prefix + `n` on both sides, so they agree by
+      // construction rather than by two string templates staying in step.
+      id={domId}
       // Focusable programmatically, but skipped by Tab. -1 rather than 0
       // because this card is not a control: putting every source in the tab
       // order would make getting past the citations panel a five-key journey,

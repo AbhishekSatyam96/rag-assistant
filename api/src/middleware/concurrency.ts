@@ -66,3 +66,22 @@ export function limitConcurrent(max: number, message: string): RequestHandler {
     next();
   };
 }
+
+// THE SHARED BUDGET for every route that generates an answer — /queries and both
+// streaming chat endpoints.
+//
+// A single instance rather than a limitConcurrent(...) call at each mount point,
+// and the distinction is not cosmetic: `inFlight` is closed over per call, so
+// three separate instances would let one user hold 2 + 2 + 2 = six concurrent
+// generations while every individual limit still read as "2". The thing being
+// protected — OpenAI spend, and this process's sockets — is shared, so the
+// counter has to be shared too.
+//
+// 2, not 1: a user who asks a question, changes their mind, and asks another
+// should not be blocked by their own abandoned stream in the moment before the
+// socket closes. Beyond that a human has no reason to hold three generations
+// open at once — but a script does.
+export const answerConcurrency = limitConcurrent(
+  2,
+  "You already have answers in progress. Wait for them to finish.",
+);

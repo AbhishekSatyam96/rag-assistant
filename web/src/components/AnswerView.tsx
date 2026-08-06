@@ -1,51 +1,18 @@
 "use client";
 
 import type { Source } from "@/lib/api";
+import { parseCitations } from "@/lib/citations";
 import { cn } from "@/lib/cn";
 
-// Renders the streamed answer, turning the model's inline "[2]" markers into
-// real citation chips.
+// Renders a streamed answer, turning the model's inline "[2]" markers into real
+// citation chips. Used by both /ask and the chat thread — which is why the
+// parsing itself now lives in lib/citations.ts rather than in this file.
 //
-// The parsing is done at RENDER time on the accumulated text, not once when the
-// stream finishes. That matters because the text grows token by token: a marker
-// may briefly arrive as "[", then "[1", then "[1]". Re-deriving from the current
-// string each render means a half-typed marker simply displays as the literal
-// characters it currently is, and becomes a chip the instant it completes. The
-// alternative — parsing incrementally and keeping a cursor — has to handle the
-// partial-marker state explicitly, for no benefit.
-
-const CITATION = /\[(\d+)\]/g;
-
-type Segment =
-  | { kind: "text"; value: string }
-  | { kind: "citation"; n: number };
-
-// Split "runs first [2] and then [3]" into alternating text/citation segments.
-// Exported so it can be unit-tested without rendering anything — the logic most
-// likely to break is the parsing, not the markup.
-export function parseCitations(text: string): Segment[] {
-  const segments: Segment[] = [];
-  let lastIndex = 0;
-
-  // `matchAll` rather than a `while (exec())` loop: exec on a /g regex mutates
-  // `lastIndex` on the shared regex object, so a module-level regex used this
-  // way carries state between calls and skips matches on every other render.
-  // A genuinely nasty bug, and one this component would hit constantly.
-  for (const match of text.matchAll(CITATION)) {
-    const index = match.index;
-    if (index > lastIndex) {
-      segments.push({ kind: "text", value: text.slice(lastIndex, index) });
-    }
-    segments.push({ kind: "citation", n: Number(match[1]) });
-    lastIndex = index + match[0].length;
-  }
-
-  if (lastIndex < text.length) {
-    segments.push({ kind: "text", value: text.slice(lastIndex) });
-  }
-
-  return segments;
-}
+// `sources` is the list belonging to THIS answer, not "the current sources".
+// In a conversation each turn retrieves its own chunks and numbers them from 1
+// again, so a turn-3 answer's "[2]" and a turn-1 answer's "[2]" point at
+// different passages. Passing each message its own snapshot is what keeps an
+// old answer's chips resolving to the evidence it was actually built from.
 
 type AnswerViewProps = {
   answer: string;

@@ -5,6 +5,7 @@ import { ButtonLink } from "@/components/ui/Button";
 import {
   IconAlert,
   IconArrowRight,
+  IconChat,
   IconExternal,
   IconFile,
   IconLayers,
@@ -29,7 +30,7 @@ import {
 export const metadata: Metadata = {
   title: "Case study",
   description:
-    "How the RAG Knowledge Assistant is built: architecture, the decisions worth defending, and what was deliberately left out.",
+    "How the RAG Knowledge Assistant is built: architecture, the decisions worth defending, why a follow-up question breaks retrieval, and what was deliberately left out.",
 };
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,11 @@ const PIPELINE = [
     icon: <IconQuote className="size-4" />,
     step: "Ground",
     body: "The top passages become a numbered context block at temperature 0, and the model must cite them. Sources stream to the browser before the first token of the answer, because retrieval is fast and generation is slow.",
+  },
+  {
+    icon: <IconChat className="size-4" />,
+    step: "Follow up",
+    body: "A follow-up is rewritten against the conversation before anything is searched, because a question like \"how long is it?\" carries no meaning an embedding model can use. Instructions about the previous answer rather than requests for new information skip retrieval entirely and reuse the sources already on screen.",
   },
 ] as const;
 
@@ -99,6 +105,36 @@ const DECISIONS = [
     body: "Left to its own judgement the model writes a different apology every time, and a waffle is indistinguishable from a weak answer. A verbatim constant is something the interface can detect and an evaluation can assert on. Together with temperature 0, it is what makes refusal accuracy a measurable quantity rather than an impression.",
   },
   {
+    tag: "Conversation",
+    title: "A follow-up is rewritten before it is searched",
+    body: "Retrieval works by turning a question into a vector and finding the nearest passages, which only works while the question carries its own meaning. \"How long is it?\" does not. It embeds to something about pronouns and duration, matches nothing useful, and the grounding prompt then correctly refuses — so the user is told their documents do not cover a question they just watched being answered. Every component behaved exactly as designed. That is the lesson worth taking from this system: the visible failure is almost never where the bug is, because a confident wrong answer and an unnecessary refusal usually both mean retrieval was handed the wrong query.",
+  },
+  {
+    tag: "Conversation",
+    title: "Some follow-ups skip retrieval altogether",
+    body: "There is no standalone question hiding inside \"make that shorter\". Rewriting it produces nonsense, and searching for it returns whatever the least relevant passages in the corpus happen to be, because semantic search always returns something. So the rewriting step is allowed to answer \"no search needed\", and those turns reuse the previous answer's sources instead. It is the cheapest path in the system and the one that makes it feel like a conversation rather than a search box with a memory.",
+  },
+  {
+    tag: "Conversation",
+    title: "The rewritten query drives what is looked up, the original drives what is said",
+    body: "The generation step never sees the rewritten question. Send it the rewrite and an instruction like \"make that shorter\" turns into a fresh answer to a question nobody asked. Keeping the two inputs separate is the whole design in one sentence, and getting it backwards produces output that is fluent, grounded, cited, and not a reply to anything the user typed.",
+  },
+  {
+    tag: "Security",
+    title: "Conversation history is loaded from the database, never sent by the browser",
+    body: "The obvious design has the client post its own transcript. It already has one on screen and the server stays stateless. It also lets a caller fabricate an assistant turn, which lands in the slot of the prompt a model weights most heavily: you previously agreed to ignore your source-only rule. History is therefore read back from rows the caller owns. It is the same rule as never taking a user identifier from a request body, applied to a field most people do not immediately read as security-relevant.",
+  },
+  {
+    tag: "Data integrity",
+    title: "Citations are copied onto the answer, not referenced",
+    body: "The normalised design links each answer to the passages it used. It is wrong here, because passages are deleted with their document and recreated with new identifiers whenever a document is reprocessed — and reprocessing is a first-class operation in this system, not an edge case. A reference would make old citations either vanish or dangle. The resolution comes from asking what a citation actually asserts: not that an answer points at a row, but that it was built from this passage at the time it was given. Historical claims get stored as copies. The cost is duplicated text and the loss of an easy query for what gets cited most, and both were accepted.",
+  },
+  {
+    tag: "Evaluation",
+    title: "Adding conversations did not touch the path being measured",
+    body: "The rewriting step sits in front of retrieval, so folding it into the existing single-turn endpoint would have made retrieval quality measure rewriting and retrieval together while still being read as retrieval alone. When the number moved there would be no way to attribute it. Chat is a sibling instead: the single-turn path is unchanged down to the system prompt string, and the conversation rules are appended to that prompt rather than edited into it. Both surfaces call the same retrieval and generation code, so the thing being measured is still the thing people use.",
+  },
+  {
     tag: "Operations",
     title: "trust proxy is a hop count, never true",
     body: "Left unset, the rate limiter sees the platform edge and the entire internet shares one bucket. Set to true, the framework trusts the whole forwarded-for chain, and since anyone can send that header an attacker mints a fresh unlimited bucket per request. Both failures report correctly in the response headers while enforcing nothing.",
@@ -115,12 +151,20 @@ const DECISIONS = [
 // honestly, and this one is neither.
 const NOT_BUILT = [
   {
-    title: "No automated test suite",
-    body: "Verification so far is runtime scripts and end-to-end probes against the deployed system. The application factory is already structured to be driven by a test harness, which is the part that would otherwise be expensive to retrofit.",
+    title: "Tests cover the boundary, not the database path",
+    body: "A unit and HTTP suite runs with no database and no network: validation schemas, chunking, and everything that resolves before the first query. What it cannot reach is anything needing a real row, which unfortunately includes the three highest-value targets — the tenant-scoping predicate in the hand-written vector SQL, the deduplication race, and the stream parser. Those need an integration tier against a real database with a stubbed embedder. The dependency-injection seams for it already exist; the tier does not.",
+  },
+  {
+    title: "The conversation module has no tests at all",
+    body: "It is the newest code here and it was verified by hand against a real database and a real model, which is not the same thing and is worth saying before anyone asks. Three pure functions belong in the existing suite today. The persistence path, the append race and the guarantee that stopping a stream still saves the partial answer all need the integration tier above.",
   },
   {
     title: "No evaluation harness yet",
-    body: "This is the next piece of work and the reason several numbers below are described as chosen rather than measured.",
+    body: "The test runner and a reproducible corpus builder exist. The golden question set and every metric do not. That is the next piece of work, and the reason several numbers below are described as chosen rather than measured.",
+  },
+  {
+    title: "Rewriting quality is unmeasured",
+    body: "Rewriting a follow-up before searching is a real improvement and an unproven one. It also introduces a failure mode that did not exist before: a rewrite that loses the user's intent produces confident retrieval of the wrong passage, which reads exactly like a retrieval regression and is not one. The comparison that would settle it is retrieval accuracy on the rewritten query against the same measure on the raw follow-up. It shipped on a product argument, because multi-turn is unusable without it, and no claim about its quality is made anywhere until that number exists.",
   },
   {
     title: "OCR for scanned PDFs",
@@ -135,8 +179,8 @@ const NOT_BUILT = [
     body: "Burst limits, a daily ceiling and a concurrent-stream cap bound usage today. Attributing actual spend per user needs usage reporting turned on in the streaming responses and a table to persist it.",
   },
   {
-    title: "Reranking, hybrid search, query rewriting",
-    body: "All three are well-understood improvements to retrieval quality. All three are held until there is an evaluation harness that can show they help this corpus, rather than adding them because the literature says they usually help.",
+    title: "Reranking and hybrid search",
+    body: "Both are well-understood improvements to retrieval quality, and both are held until there is an evaluation harness that can show they help this corpus rather than adding them because the literature says they usually help. Query rewriting was on this list until conversations needed it, which is a change of sequencing rather than of principle — and it is why the item above exists.",
   },
 ] as const;
 
@@ -167,8 +211,8 @@ export default function CaseStudy() {
         <p className="mt-5 text-[17px] leading-relaxed text-pretty text-muted">
           Most of the difficulty in retrieval-augmented generation is not the retrieval. It
           is the decisions that never raise an error when you get them wrong. This is a
-          record of those decisions, the alternatives they beat, and the parts that are
-          deliberately still missing.
+          record of those decisions, the alternatives they beat, one that I got wrong and
+          had to trace back, and the parts that are deliberately still missing.
         </p>
 
         <dl className="mt-8 grid gap-x-8 gap-y-4 border-t border-line pt-6 sm:grid-cols-2">
@@ -183,7 +227,7 @@ export default function CaseStudy() {
         </dl>
 
         <div className="mt-8 flex flex-wrap items-center gap-3">
-          <ButtonLink href="/ask" variant="primary" size="md">
+          <ButtonLink href="/chat" variant="primary" size="md">
             Try it live
             <IconArrowRight className="size-4" />
           </ButtonLink>
@@ -237,7 +281,7 @@ export default function CaseStudy() {
 
       <Section
         title="How a question becomes an answer"
-        lead="Three stages, each with a failure mode that shaped how it is written."
+        lead="Four stages, each with a failure mode that shaped how it is written."
       >
         <ol className="flex flex-col gap-3">
           {PIPELINE.map((stage, i) => (
@@ -285,6 +329,60 @@ export default function CaseStudy() {
               </p>
             </article>
           ))}
+        </div>
+      </Section>
+
+      {/* ---------------------------------------------------------------- */}
+      {/* One bug, in full                                                  */}
+      {/*                                                                   */}
+      {/* Included because every other section describes a decision that    */}
+      {/* worked. A case study made entirely of those reads like marketing. */}
+      {/* This one is small, specific, and the lesson generalises past this */}
+      {/* codebase, which is the only real test of whether a war story is   */}
+      {/* worth publishing.                                                 */}
+      {/* ---------------------------------------------------------------- */}
+
+      <Section
+        title="One bug, in full"
+        lead="Two of my own decisions fought each other, and the instruction lost to the example."
+      >
+        <div className="flex flex-col gap-3">
+          <p className="text-[15px] leading-relaxed text-pretty text-muted">
+            Every answer numbers its sources from one. In a conversation each turn retrieves
+            its own passages and numbers them again, so the second turn&rsquo;s{" "}
+            <code className="rounded bg-raised px-1 py-0.5 font-mono text-[13px] text-fg">
+              [2]
+            </code>{" "}
+            and the fourth turn&rsquo;s are different documents entirely. Replaying old
+            answers into the prompt with those markers intact invites the model to reuse a
+            numbering that no longer means anything, so the markers are stripped out of
+            history first. Sound reasoning, and it is the right default.
+          </p>
+
+          <p className="text-[15px] leading-relaxed text-pretty text-muted">
+            Then I tested &ldquo;make it shorter&rdquo;, which reuses the previous turn&rsquo;s
+            sources rather than searching again. The answer came back correct and completely
+            uncited. The system prompt has an explicit rule requiring an inline citation on
+            every claim. I added a second rule stating that reformatting requests still need
+            them. It was ignored again.
+          </p>
+
+          <p className="text-[15px] leading-relaxed text-pretty text-fg">
+            The cause was the stripping. On a reuse turn the model is shown its own previous
+            answer with every citation removed, and then asked to reproduce it more briefly.
+            It copied what it saw. The demonstration sitting in the context window beat the
+            instruction sitting in the system prompt.
+          </p>
+
+          <p className="text-[15px] leading-relaxed text-pretty text-muted">
+            The fix is narrow, because the reasoning behind the stripping was never wrong in
+            general: keep the markers on the final answer, but only on a reuse turn, where
+            the sources being sent genuinely are the same ones the numbers referred to. What
+            I would actually take to the next project is the diagnostic habit rather than the
+            patch. When a model ignores a rule, read what the prompt is showing it before
+            writing another rule, because prompt failures are frequently demonstration
+            failures wearing an instruction&rsquo;s clothes.
+          </p>
         </div>
       </Section>
 
@@ -349,6 +447,15 @@ export default function CaseStudy() {
             very small chunks. Whether that hurts retrieval is a question for the harness,
             not for my intuition.
           </p>
+
+          <p className="mt-4 text-[15px] leading-relaxed text-pretty text-muted">
+            Conversations added a fourth question rather than removing any. Rewriting a
+            follow-up before searching sits in front of retrieval, so it needs its own
+            measurement — retrieval accuracy on the rewritten query against the same measure
+            on the raw follow-up. The single-turn endpoint was deliberately left untouched so
+            that the harness still has one path where retrieval is the only variable, which
+            is the reason two ways of asking a question exist at all.
+          </p>
         </div>
       </Section>
 
@@ -364,7 +471,7 @@ export default function CaseStudy() {
           <p className="mx-auto mt-3 max-w-lg text-[15px] leading-relaxed text-pretty text-muted">
             Sign up, paste a document or drop a PDF, and ask it something the document does
             not cover. Watching it refuse is the fastest way to check that any of this is
-            true.
+            true. Then ask a follow-up with a pronoun in it and watch what it searches for.
           </p>
 
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3">

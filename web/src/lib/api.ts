@@ -1,3 +1,5 @@
+import { readNdjson } from "./ndjson";
+
 // Thin, typed wrapper around fetch — the client-side mirror of the api's
 // route/service split. Components never call fetch directly; they call these
 // typed functions, which:
@@ -96,7 +98,7 @@ export function isProcessing(doc: DocumentSummary): boolean {
 }
 
 type RequestOptions = {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "DELETE";
   body?: unknown;
   token?: string;
 };
@@ -131,6 +133,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     // block) — never on a 4xx/5xx. Surface a human message, not "Failed to fetch".
     throw new ApiError(0, "Can't reach the server. Is the API running on port 4000?");
   }
+
+  // 204 No Content has no body, and `res.json()` on an empty body rejects. The
+  // `.catch(() => null)` below would swallow that and produce `null`, which is
+  // the right VALUE but arrives via an error path — so a genuinely successful
+  // DELETE would be indistinguishable from a proxy returning HTML. Checking the
+  // status explicitly keeps those two apart.
+  if (res.status === 204) return undefined as T;
 
   // The api always answers JSON; parse defensively in case a proxy returns HTML.
   const data = await res.json().catch(() => null);
@@ -357,55 +366,129 @@ export async function* streamAsk(
 
   if (!res.body) throw new ApiError(0, "Streaming is not supported in this browser.");
 
-  const reader = res.body.getReader();
-  // `stream: true` is load-bearing. A UTF-8 character can be up to 4 bytes, and
-  // a network chunk can split one down the middle. Without it, TextDecoder
-  // treats each chunk as a complete document and emits U+FFFD (�) for the
-  // dangling bytes; with it, the decoder holds the partial character back until
-  // the rest arrives. Bugs from this only appear on non-ASCII output, which is
-  // why they reliably survive to production.
-  const decoder = new TextDecoder();
-  let buffer = "";
+  // The line-buffering and UTF-8 handling live in lib/ndjson.ts, shared with
+  // streamChat below. Everything above this point — the fetch, the abort
+  // rethrow, the pre-stream error decode — is the part that differs per
+  // endpoint, which is exactly where the split was drawn.
+  yield* readNdjson<QueryEvent>(res.body);
+}
 
+// --- conversations (chat) ----------------------------------------------------
+
+// Chat is a SEPARATE surface from /ask, not a replacement. Both are built on the
+// same retrieval and generation code on the server; /ask stays single-turn and
+// stateless because it is the path the eval harness scores, and a measurement
+// target that shifts underneath the measurement is worthless.
+
+export type ConversationSummary = {
+  id: string;
+  title: string;
+  // Strings, not Dates — these went through JSON, which has no date type.
+  createdAt: string;
+  // Reflects the last MESSAGE, not the creation time, which is what the list
+  // sorts on: a thread you replied to five minutes ago belongs at the top.
+  updatedAt: string;
+};
+
+export type MsgRole = "USER" | "ASSISTANT";
+
+export type ChatMessage = {
+  id: string;
+  role: MsgRole;
+  content: string;
+  // Empty for USER messages, and for an ASSISTANT message this is the snapshot
+  // taken when the answer was written — NOT the current retrieval for this
+  // thread. Each turn numbers its sources from 1 independently, so an old
+  // answer's "[2]" only resolves correctly against its own list. That is why
+  // this travels per-message instead of per-conversation.
+  sources: Source[];
+  seq: number;
+  createdAt: string;
+};
+
+export type ConversationDetail = ConversationSummary & {
+  messages: ChatMessage[];
+};
+
+export type ConversationPage = {
+  conversations: ConversationSummary[];
+  nextCursor: string | null;
+};
+
+// The api's ConversationEvent union. Extends QueryEvent with two chat-only
+// events rather than redefining the shared four, so a change on the server
+// breaks the exhaustive switch in both consumers.
+export type ChatEvent =
+  | { type: "conversation"; conversationId: string; title: string; messageId: string }
+  // What the server actually searched for. Worth showing: the rewrite step
+  // silently turns "how long is it?" into a standalone query, and a user who
+  // cannot see that has no way to tell a bad rewrite from bad retrieval.
+  // `reused` means the follow-up was an instruction about the previous answer
+  // ("make it shorter") and no new search was run at all.
+  | { type: "search"; query: string; rewritten: boolean; reused: boolean }
+  | QueryEvent;
+
+export function listConversations(
+  token: string,
+  options: { limit?: number; cursor?: string } = {},
+): Promise<ConversationPage> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.cursor) params.set("cursor", options.cursor);
+
+  const query = params.toString();
+  return request<ConversationPage>(`/conversations${query ? `?${query}` : ""}`, { token });
+}
+
+export function getConversation(
+  token: string,
+  id: string,
+): Promise<{ conversation: ConversationDetail }> {
+  return request<{ conversation: ConversationDetail }>(`/conversations/${id}`, { token });
+}
+
+export function deleteConversation(token: string, id: string): Promise<void> {
+  return request<void>(`/conversations/${id}`, { method: "DELETE", token });
+}
+
+// Start a thread, or add a turn to one. Which of the two is decided by the
+// presence of `conversationId`, because from the caller's point of view it is
+// one action — "send this question" — and making the component branch between
+// two functions would push a server-shaped distinction into the UI.
+export async function* streamChat(
+  token: string,
+  input: { conversationId?: string; question: string; k?: number },
+  signal?: AbortSignal,
+): AsyncGenerator<ChatEvent> {
+  const { conversationId, ...body } = input;
+  const path = conversationId
+    ? `/conversations/${conversationId}/messages`
+    : "/conversations";
+
+  let res: Response;
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      // The OTHER half of the same problem, at the line level: a network chunk
-      // has nothing to do with a line boundary. One read can deliver two and a
-      // half events, and the next delivers the missing half. So we accumulate
-      // into `buffer` and only consume up to the last complete newline — the
-      // remainder stays buffered for the next read. `JSON.parse(chunk)` without
-      // this works perfectly on short answers and fails on long ones, which is
-      // the worst possible failure schedule.
-      let newline: number;
-      while ((newline = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (line) yield JSON.parse(line) as QueryEvent;
-      }
-    }
-
-    // The server always terminates its final event with a newline, so anything
-    // left here means the stream was cut mid-event. Parse it only if it happens
-    // to be valid JSON; a truncated fragment is dropped rather than thrown,
-    // because the tokens already delivered are still worth showing.
-    const rest = buffer.trim();
-    if (rest) {
-      try {
-        yield JSON.parse(rest) as QueryEvent;
-      } catch {
-        /* truncated trailing fragment — ignore */
-      }
-    }
-  } finally {
-    // Runs on early `break`, on an exception, and on abort. Without it, a
-    // consumer that stops reading leaves the connection open and the browser
-    // holding a lock on the stream. `finally` in a generator fires when the
-    // generator is disposed, which is exactly the guarantee needed here.
-    reader.cancel().catch(() => {});
+    res = await fetch(`${BASE_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    // An abort surfaces here as an exception too. Rethrow it untouched so the
+    // caller can tell "I cancelled this" apart from "the server is unreachable"
+    // — otherwise clicking Stop renders a scary connection error.
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError(0, "Can't reach the server. Is the API running on port 4000?");
   }
+
+  // A failure BEFORE the stream started is an ordinary JSON error with a real
+  // status code — the server defers its headers precisely so this stays
+  // possible. That is what makes a 404 for someone else's thread, a 429 from the
+  // rate limiter, and a 409 from two tabs racing all behave like errors anywhere
+  // else in this file.
+  if (!res.ok) throw apiError(res.status, await res.json().catch(() => null));
+
+  if (!res.body) throw new ApiError(0, "Streaming is not supported in this browser.");
+
+  yield* readNdjson<ChatEvent>(res.body);
 }

@@ -4,9 +4,10 @@ import { prisma } from "./lib/prisma.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { documentRouter } from "./modules/documents/document.routes.js";
 import { queryRouter } from "./modules/queries/query.routes.js";
+import { conversationRouter } from "./modules/conversations/conversation.routes.js";
 import { requireAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error.js";
-import { limitConcurrent } from "./middleware/concurrency.js";
+import { answerConcurrency } from "./middleware/concurrency.js";
 import {
   queryBurstLimiter,
   queryDailyLimiter,
@@ -98,29 +99,47 @@ export function createApp() {
   //   global            after the per-user limits, so one abusive account is
   //                     stopped by its own budget before it can eat the shared
   //                     one that everybody else is drawing from.
-  //   limitConcurrent   last, because it is the only one holding state for the
+  //   answerConcurrency last, because it is the only one holding state for the
   //                     LIFETIME of the request rather than the instant of
   //                     arrival: it must not increment for a request that one
   //                     of the limiters above is about to reject.
   //
   // All of them sit in front of the router, which is what makes a 429 possible
-  // at all here. This route streams, and the moment queryRouter calls
+  // at all here. This route streams, and the moment the response calls
   // flushHeaders() the status code is spent — a limit discovered after that
   // point could only be reported as an in-band error event on a 200 response.
-  // See the long comment in query.routes.ts.
+  // See the long comment in lib/ndjson-stream.ts.
+  //
+  // `answerConcurrency` is a shared singleton rather than a limitConcurrent(...)
+  // call here, because /conversations generates answers too and the two surfaces
+  // must draw on ONE budget — see the note on its definition.
   app.use(
     "/queries",
     requireAuth,
     queryBurstLimiter,
     queryDailyLimiter,
     globalQueryLimiter,
-    // 2, not 1: a user who asks a question, changes their mind, and asks
-    // another should not be blocked by their own abandoned stream in the
-    // moment before the socket closes. Beyond that, a human has no reason to
-    // hold three generations open at once — but a script does.
-    limitConcurrent(2, "You already have answers in progress. Wait for them to finish."),
+    answerConcurrency,
     queryRouter,
   );
+
+  // The multi-turn surface, sibling to /queries rather than a replacement for
+  // it. Both call the same retrieval and generation primitives; /queries stays
+  // single-turn and stateless so the M7 eval harness keeps scoring a code path
+  // that does not move underneath it.
+  //
+  // Only requireAuth is applied at the mount point. Unlike /queries this router
+  // mixes expensive streaming POSTs with cheap GETs — listing threads, reading
+  // one — and budgeting a history read against the daily ANSWER limit would lock
+  // a user out of transcripts they have already paid for. The guards therefore
+  // sit on the two POSTs inside the router. See conversation.routes.ts.
+  //
+  //   POST   /conversations           start a thread, stream the first answer
+  //   POST   /conversations/:id/messages   continue a thread
+  //   GET    /conversations           cursor-paginated list
+  //   GET    /conversations/:id       thread + messages
+  //   DELETE /conversations/:id
+  app.use("/conversations", requireAuth, conversationRouter);
 
   // Error middleware must be registered LAST, after all routes.
   app.use(errorHandler);

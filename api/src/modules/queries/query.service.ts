@@ -55,7 +55,11 @@ export type QueryEvent =
   // status, so it has to be in-band. See query.routes.ts.
   | { type: "error"; message: string };
 
-function toSource(chunk: RetrievedChunk, index: number): Source {
+// Exported for the conversations module, which produces the identical wire
+// shape from the identical retrieval call. `Source` is the contract the client
+// is written against, so there should be exactly one function that constructs
+// one — two copies would drift the moment a field is added.
+export function toSource(chunk: RetrievedChunk, index: number): Source {
   return {
     n: index + 1,
     documentId: chunk.documentId,

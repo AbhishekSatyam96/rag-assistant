@@ -6,19 +6,13 @@ import { useRequireAuth } from "@/lib/use-require-auth";
 import { AnswerView } from "@/components/AnswerView";
 import { SourceList } from "@/components/SourceList";
 import { PageHeader } from "@/components/AppShell";
+import { ChatComposer } from "@/components/ChatComposer";
 import { PageLoading } from "@/components/ui/PageLoading";
-import { Button, ButtonLink } from "@/components/ui/Button";
+import { ButtonLink } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
 import { SectionHeading } from "@/components/ui/Card";
 import { Spinner } from "@/components/ui/Spinner";
-import {
-  IconArrowRight,
-  IconFile,
-  IconLayers,
-  IconSearch,
-  IconSpark,
-  IconStop,
-} from "@/components/icons";
+import { IconArrowRight, IconFile, IconLayers, IconSpark } from "@/components/icons";
 
 // Starter questions for an empty page. A blank input with no prompt is the
 // hardest possible first interaction — these are generic enough to work against
@@ -88,7 +82,6 @@ export default function AskPage() {
   // a request that already finished.
   const abortRef = useRef<AbortController | null>(null);
 
-  const inputRef = useRef<HTMLTextAreaElement>(null);
   const answerRef = useRef<HTMLElement>(null);
 
   // Abort on unmount. Navigating away mid-answer should stop the server
@@ -98,42 +91,6 @@ export default function AskPage() {
   useEffect(() => {
     return () => abortRef.current?.abort();
   }, []);
-
-  // Grow the textarea to fit its content.
-  //
-  // Keyed on `question` rather than done in onChange, because the value also
-  // changes programmatically — clicking an example chip calls setQuestion, and
-  // an onChange-only implementation would leave the box one line tall with the
-  // text scrolled out of sight. An effect covers both paths by construction.
-  //
-  // `height = "auto"` first is load-bearing: scrollHeight can only report a
-  // value at least as large as the current height, so measuring without the
-  // reset means the box can grow but never shrink again after a deletion.
-  // The 5-line ceiling is CSS (`max-h-34`), not JS — the browser clamps the
-  // assignment and hands over a scrollbar, so there's no maximum to keep in
-  // sync across two files.
-  useEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }, [question]);
-
-  // Focus the question box on arrival — this page exists to be typed into.
-  //
-  // Guarded on `(pointer: fine)` rather than a width breakpoint: the thing that
-  // makes autofocus hostile is a virtual keyboard sliding up and eating half
-  // the screen before you've read the page, which tracks the input device, not
-  // the viewport. A 1024px-wide tablet is the case a `sm:` check gets wrong.
-  //
-  // Depends on `status` because the textarea isn't mounted until auth resolves;
-  // on a hard refresh a mount-only effect would run while PageLoading is still
-  // on screen and find a null ref.
-  useEffect(() => {
-    if (status !== "authenticated") return;
-    if (!window.matchMedia("(pointer: fine)").matches) return;
-    inputRef.current?.focus();
-  }, [status]);
 
   // Bring the answer into view when a NEW question is asked.
   //
@@ -282,85 +239,20 @@ export default function AskPage() {
         description="Answers are generated only from your documents, with citations you can open."
       />
 
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          ask(question);
-        }}
+      {/* The composer — the auto-grow, the IME guard, the Enter/Shift+Enter
+          handling — moved to components/ChatComposer.tsx when /chat needed the
+          same control. Same reasoning as the NDJSON reader: every detail in
+          there took a specific bug to find, and two copies means the next fix
+          lands in one of them. */}
+      <ChatComposer
+        value={question}
+        onChange={setQuestion}
+        onSubmit={ask}
+        onStop={stop}
+        streaming={streaming}
+        autoFocus={status === "authenticated"}
         className="mb-8"
-      >
-        {/* The input and its button share one bordered container rather than
-            sitting side by side with a gap. `focus-within` moves the focus ring
-            to that container, so the whole control lights up as a single object
-            — which is what it is.
-
-            `items-end`, so that as the textarea grows the button stays pinned
-            to the bottom edge next to the last line rather than drifting to the
-            vertical middle of a five-line box. */}
-        <div className="flex items-end gap-2 rounded-xl border border-line bg-surface p-1.5 shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-accent focus-within:ring-4 focus-within:ring-accent/15">
-          {/* `mt-3` centres the icon against the FIRST line (the 40px row minus
-              the 16px icon, halved) instead of letting `items-end` drop it to
-              the bottom of a grown box, where it would label nothing. */}
-          <IconSearch className="mt-3 ml-2 size-4 shrink-0 self-start text-faint" />
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => {
-              // Enter submits, Shift+Enter breaks the line — the convention
-              // every chat input has trained users into. Without this a
-              // textarea silently downgrades the primary action from "press
-              // Enter" to "go find the button".
-              if (e.key !== "Enter" || e.shiftKey) return;
-
-              // An IME (Japanese, Chinese, Korean) uses Enter to COMMIT the
-              // candidate you're picking, and fires keydown for it while
-              // composition is still open. Submitting there would send a
-              // half-converted question and clear the box mid-word — a bug
-              // invisible to anyone testing in English.
-              if (e.nativeEvent.isComposing) return;
-
-              e.preventDefault();
-              ask(question);
-            }}
-            placeholder="What do your documents say about…?"
-            maxLength={1000}
-            disabled={streaming}
-            aria-label="Your question"
-            // `py-2` + `leading-6` makes a single line exactly 40px — the same
-            // height as the md Button beside it — so the control doesn't change
-            // shape between the empty state and the first character typed.
-            //
-            // `max-h-34` is the 5-line ceiling the auto-grow effect relies on:
-            // it clamps the height assignment and hands over a scrollbar,
-            // rather than the effect having to know the limit itself.
-            //
-            // The border/ring lives on the parent, so this strips its own
-            // entirely — including the global :focus-visible outline, which
-            // would otherwise draw a second ring inside the first.
-            className="scrollbar-slim min-w-0 flex-1 resize-none bg-transparent py-2 text-[15px] leading-6 text-fg max-h-34 placeholder:text-faint focus:outline-none focus-visible:outline-none disabled:text-muted"
-          />
-          {streaming ? (
-            // Swapping Ask for Stop rather than showing both: while a stream is
-            // running, stopping it is the only useful action.
-            <Button onClick={stop} variant="secondary" className="shrink-0">
-              <IconStop className="size-3.5" />
-              Stop
-            </Button>
-          ) : (
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={!question.trim()}
-              className="shrink-0"
-            >
-              Ask
-              <IconArrowRight className="size-4" />
-            </Button>
-          )}
-        </div>
-      </form>
+      />
 
       {/* The blank slate. Only shown before the first question — once there's a
           result, re-offering examples would compete with the answer.

@@ -118,6 +118,22 @@ export function IconChevronDown(props: IconProps) {
   );
 }
 
+export function IconChat(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-3.9-.9L3 20.5l1.5-4.1A8.4 8.4 0 0 1 3.6 12a8.4 8.4 0 0 1 8.4-8.4h.5a8.4 8.4 0 0 1 8.5 7.9Z" />
+    </Icon>
+  );
+}
+
+export function IconTrash(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4 7h16M10 11v6m4-6v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+    </Icon>
+  );
+}
+
 export function IconArrowRight(props: IconProps) {
   return (
     <Icon {...props}>

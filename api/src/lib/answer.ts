@@ -1,6 +1,22 @@
 import { openai } from "./openai.js";
 import { env } from "./env.js";
-import type { RetrievedChunk } from "./retrieve.js";
+import { trimHistory, type HistoryTurn } from "./condense.js";
+
+// Everything this file needs from a chunk in order to build a numbered context
+// block — and nothing more.
+//
+// Declared structurally instead of importing RetrievedChunk because there are
+// now two sources of context. Fresh retrieval hands over RetrievedChunk[], and
+// a conversational follow-up like "make that shorter" re-uses the PREVIOUS
+// turn's stored citations, which are Source[] read back out of a JSON column and
+// have neither a chunkId nor a distance. Both satisfy this shape, so both pass
+// straight in with no adapter and no synthetic fields invented to satisfy a
+// type. Narrow the input, widen the callers.
+export type ContextChunk = {
+  documentTitle: string;
+  chunkIndex: number;
+  content: string;
+};
 
 // Generation: retrieved chunks in, a grounded answer out, streamed token by
 // token.
@@ -27,7 +43,7 @@ export const REFUSAL = "I don't have enough information in your documents to ans
 // into prose a human reads, and "[0]" reads like a typo. The UI maps marker n
 // back to `sources[n - 1]`; that off-by-one lives in exactly one place (the
 // frontend renderer) rather than being re-derived at each call site.
-export function formatContext(chunks: RetrievedChunk[]): string {
+export function formatContext(chunks: ContextChunk[]): string {
   return chunks
     .map(
       (c, i) =>
@@ -59,9 +75,44 @@ Rules:
 5. Do not speculate, do not extrapolate beyond the sources, and do not pad the answer with general background.
 6. Be concise and direct. Prefer short paragraphs or bullets over preamble.`;
 
+// APPENDED ONLY WHEN THERE IS HISTORY, and that condition is the point.
+//
+// SYSTEM_PROMPT above is the exact string the M7 eval harness scores. Editing it
+// to mention conversations would silently move every number the harness
+// produces, and the change would be indistinguishable from a retrieval
+// regression when the graph moved. So the single-turn prompt stays byte-for-byte
+// what it was, and multi-turn gets a suffix.
+//
+// The two rules it adds exist because history introduces failures single-turn
+// cannot have:
+//   7 — the numbering collision. Earlier answers in this conversation were built
+//       from DIFFERENT source lists that were also numbered from 1. The markers
+//       are stripped before the model sees them (see stripCitations), but it
+//       still has to be told that only the sources in this message are citable,
+//       or it will cite [4] from memory of a list that had four entries.
+//   8 — the model treating its own earlier answer as evidence. Once its prose is
+//       in the context window it is just text, and text in the context window is
+//       exactly what rule 1 tells it to answer from. Left unsaid, a conversation
+//       drifts further from the documents with every turn while still sounding
+//       cited.
+const CONVERSATION_RULES = `
+7. The conversation above is for context only. Cite ONLY the numbered sources in this message; earlier answers used a different, unrelated numbering.
+8. Never treat your own earlier replies as a source. Only the numbered sources below are evidence.
+9. A request to shorten, reformat or re-explain a previous answer is still an answer from the sources. Rule 3 still applies: keep the inline [n] citations.`;
+
 type StreamAnswerInput = {
   question: string;
-  chunks: RetrievedChunk[];
+  chunks: ContextChunk[];
+  // Earlier turns, oldest first, EXCLUDING the question being answered. Empty or
+  // omitted for the single-turn /queries path, which is what keeps that path's
+  // request to OpenAI identical to what it was before conversations existed.
+  history?: HistoryTurn[];
+  // True when `chunks` ARE the previous turn's sources rather than a fresh
+  // retrieval — the "make that shorter" path. It means the last answer's [n]
+  // markers still point at the list being sent now, so they survive into the
+  // prompt instead of being stripped. See trimHistory for why that matters more
+  // than it sounds like it should.
+  citationsCarryOver?: boolean;
   // Lets the caller cancel generation when the HTTP client disconnects. Without
   // it, a user closing the tab leaves us streaming tokens from OpenAI into a
   // socket nobody is reading — billed in full, to nobody's benefit.
@@ -76,6 +127,8 @@ type StreamAnswerInput = {
 export async function* streamAnswer({
   question,
   chunks,
+  history = [],
+  citationsCarryOver = false,
   signal,
 }: StreamAnswerInput): AsyncGenerator<string> {
   // Short-circuit with no model call at all when retrieval found nothing. The
@@ -93,13 +146,28 @@ export async function* streamAnswer({
   // possible later, since caching keys on a shared leading substring.
   const userPrompt = `Sources:\n\n${formatContext(chunks)}\n\n---\n\nQuestion: ${question}`;
 
+  // Truncated, citation-stripped, and capped to the last few turns — the same
+  // treatment the rewriter gives it, from the same helper, so the two prompts
+  // cannot drift in what they consider "the conversation".
+  //
+  // Note the question here is the user's ORIGINAL words, not the rewritten
+  // search query. That split is the heart of the design: the rewrite exists to
+  // make retrieval work, and feeding it to the generator instead would turn
+  // "make that shorter" into a request to re-answer a question the user did not
+  // ask. The rewrite drives WHAT WE LOOK UP; the original drives WHAT WE SAY.
+  const turns = trimHistory(history, citationsCarryOver);
+
   const stream = await openai.chat.completions.create(
     {
       model: env.CHAT_MODEL,
       temperature: TEMPERATURE,
       stream: true,
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        {
+          role: "system",
+          content: turns.length > 0 ? SYSTEM_PROMPT + CONVERSATION_RULES : SYSTEM_PROMPT,
+        },
+        ...turns,
         { role: "user", content: userPrompt },
       ],
     },

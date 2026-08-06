@@ -12,6 +12,7 @@ import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { SiteFooter } from "@/components/SiteFooter";
 import {
   IconArrowLeft,
+  IconChat,
   IconChevronDown,
   IconExternal,
   IconFile,
@@ -38,7 +39,12 @@ import {
 // "Open the assistant" / "Your documents" when authed, so the landing page acts
 // as a launcher rather than a dead end.
 
+// Chat first, because it is the surface most people want: a thread you can ask
+// follow-ups in. Ask stays because it is a genuinely different thing — one
+// question, no history, no rewrite step — and it is the path the eval harness
+// scores, so it needs to stay reachable and unchanged.
 const NAV = [
+  { href: "/chat", label: "Chat", icon: <IconChat className="size-4" /> },
   { href: "/ask", label: "Ask", icon: <IconSearch className="size-4" /> },
   { href: "/documents", label: "Documents", icon: <IconFile className="size-4" /> },
 ] as const;
@@ -131,7 +137,10 @@ function NavLink({
   children: ReactNode;
 }) {
   const pathname = usePathname();
-  const active = pathname === href;
+  // Prefix match, not equality: /chat/<id> is still the Chat section, and an
+  // exact check would drop the highlight the moment you opened a thread —
+  // leaving the header claiming you are nowhere.
+  const active = pathname === href || pathname.startsWith(`${href}/`);
 
   return (
     <Link

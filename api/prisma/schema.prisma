@@ -21,11 +21,12 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String
-  createdAt DateTime @default(now())
-  documents Document[]
+  id            String         @id @default(uuid())
+  email         String         @unique
+  password      String
+  createdAt     DateTime       @default(now())
+  documents     Document[]
+  conversations Conversation[]
 }
 
 
@@ -68,4 +69,73 @@ enum DocStatus {
   PROCESSING
   READY
   FAILED
+}
+
+// A multi-turn thread. Deliberately separate from the single-turn /queries path,
+// which persists nothing and stays exactly as it was — that endpoint is what the
+// M7 eval harness scores, and a measurement target that changes underneath the
+// measurement is worthless.
+model Conversation {
+  id     String @id @default(uuid())
+  userId String
+  // Derived from the first question, truncated. NOT model-generated: a prettier
+  // title is one more paid call per conversation for something the user can read
+  // off their own question anyway.
+  title     String
+  createdAt DateTime @default(now())
+  // Bumped on every turn, because a conversation list is ordered by recent
+  // ACTIVITY, not by when the thread was started.
+  updatedAt DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  // Matches the list query exactly: scoped to one user, newest activity first.
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+model Message {
+  id             String  @id @default(uuid())
+  conversationId String
+  role           MsgRole
+  content        String
+
+  // The citations for an ASSISTANT message, stored as a JSON SNAPSHOT of the
+  // Source[] the client received — not as foreign keys to Chunk.
+  //
+  // This is the one genuinely load-bearing modelling decision in this file.
+  // Chunks are deleted when their document is deleted and recreated with new ids
+  // whenever it is re-ingested or re-chunked. Referencing them means an old
+  // answer's citations either vanish (onDelete: Cascade) or dangle
+  // (onDelete: SetNull) the moment the library changes. A citation is a claim
+  // about what the answer was built from AT THE TIME IT WAS GIVEN, so the
+  // honest representation is a copy.
+  //
+  // What this costs, stated plainly: chunk text is duplicated per citation, and
+  // "which chunks get cited most" stops being answerable with a join. Both are
+  // acceptable here; neither is free.
+  sources Json?
+
+  // Monotonic position within the conversation, starting at 1.
+  //
+  // Ordering by createdAt looks equivalent and isn't: two messages written in
+  // the same millisecond have no defined order, and the pair this app writes per
+  // turn (question, then answer) is exactly the case where getting it backwards
+  // renders nonsense. The @@unique below then does a second job for free — two
+  // browser tabs appending to one thread race for the same seq, and the loser
+  // gets a constraint violation the service turns into a 409 instead of silently
+  // interleaving two conversations.
+  seq       Int
+  createdAt DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // Serves the ordering read as well as the race guard, so no separate
+  // @@index([conversationId]) is needed — a unique index is still an index.
+  @@unique([conversationId, seq])
+}
+
+enum MsgRole {
+  USER
+  ASSISTANT
 }
