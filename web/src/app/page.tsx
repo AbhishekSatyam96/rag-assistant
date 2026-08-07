@@ -62,9 +62,9 @@ export default function Home() {
         </h1>
 
         <p className="mx-auto mt-5 max-w-xl text-[17px] leading-relaxed text-pretty text-muted">
-          Upload what you know. Ask in plain language. Every sentence comes back with a
-          citation you can open and read — grounded in your documents, or not answered
-          at all.
+          Upload what you know. Ask in plain language, typed or out loud. Every sentence
+          comes back with a citation you can open and read — grounded in your documents,
+          or not answered at all.
         </p>
 
         <HeroActions />
@@ -187,6 +187,20 @@ export default function Home() {
             </div>
           ))}
         </div>
+
+        {/* Voice deliberately does NOT get a fourth card. Making it step 04
+            would say it is part of the pipeline, and the whole design argument
+            is that it is not — the retrieval and generation code cannot tell a
+            spoken question from a typed one, which is what keeps the evaluation
+            harness measuring retrieval rather than transcription plus
+            retrieval. A sentence that says so is more accurate than a card that
+            implies otherwise. */}
+        <p className="mx-auto mt-6 max-w-2xl text-center text-[13px] leading-relaxed text-pretty text-muted">
+          Voice sits either side of those three steps rather than inside them. A spoken
+          question becomes text before anything is searched, and a finished answer is read
+          back sentence by sentence as it streams — so the pipeline never learns which one
+          you used.
+        </p>
       </section>
     </div>
   );

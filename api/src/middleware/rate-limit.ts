@@ -68,6 +68,21 @@ const LIMITS = {
   // something here, since the whole point of the deployment is people trying it.
   // It takes 40 distinct accounts at their full 50/day to reach.
   queriesPerDayGlobal: 2000,
+  // Transcription is billed per MINUTE OF AUDIO, which is a different unit from
+  // everything above and the reason these numbers are not just the query ones
+  // reused. A request count only bounds spend once the duration per request is
+  // bounded too — that job belongs to MAX_AUDIO_BYTES in lib/audio.ts and the
+  // 60-second cap in the browser. These three then bound how many of those
+  // bounded requests a caller gets, which is the half a limiter can do.
+  //
+  // 10/min is not a budget, it is a burst guard: nobody speaks ten separate
+  // questions in a minute, while a script does it instantly. 100/day sits above
+  // the 50/day answer budget on purpose — re-recording a question you fluffed is
+  // normal, and a user locked out of the microphone while they still have
+  // questions left would be a limit punishing the wrong thing.
+  audioPerMinute: 10,
+  audioPerDay: 100,
+  audioPerDayGlobal: 1500,
 } as const;
 
 type LimiterConfig = {
@@ -242,4 +257,41 @@ export const globalQueryLimiter = makeLimiter({
   limit: LIMITS.queriesPerDayGlobal,
   keyGenerator: () => "global",
   message: "The demo has hit its daily usage limit. Please try again tomorrow.",
+});
+
+// --- transcription -----------------------------------------------------------
+
+// Voice input gets its own three limiters rather than borrowing the query ones,
+// and the structure deliberately mirrors them (burst · per-user budget · global
+// backstop) because the threat model is identical — the numbers are not.
+//
+// Sharing the query limiters would have been the smaller diff and it is wrong in
+// both directions at once: a spent question budget would silently disable the
+// microphone (two costs, one counter), and a caller who never submits a question
+// could transcribe all day against a counter nothing else decrements.
+export const audioBurstLimiter = makeLimiter({
+  name: "audio-burst",
+  windowMs: 1 * MINUTE,
+  limit: LIMITS.audioPerMinute,
+  keyGenerator: byUser,
+  message: "You're recording too quickly. Wait a moment and try again.",
+});
+
+export const audioDailyLimiter = makeLimiter({
+  name: "audio-daily",
+  windowMs: 1 * DAY,
+  limit: LIMITS.audioPerDay,
+  keyGenerator: byUser,
+  message: "You've reached today's voice-input limit. It resets in 24 hours.",
+});
+
+// Same tradeoff as globalQueryLimiter, made knowingly: enough traffic locks out
+// everyone including me. Signup is open, so "make another account" is always
+// available, and a per-user budget cannot see across accounts.
+export const globalAudioLimiter = makeLimiter({
+  name: "audio-global",
+  windowMs: 1 * DAY,
+  limit: LIMITS.audioPerDayGlobal,
+  keyGenerator: () => "global",
+  message: "Voice input has hit its daily limit for the demo. Try typing instead.",
 });

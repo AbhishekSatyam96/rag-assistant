@@ -38,14 +38,19 @@ flowchart LR
     Web["web — Next.js 16<br/>React 19 · Tailwind v4"]
     Api["api — Express 5<br/>TypeScript ESM"]
     Db[("Neon Postgres<br/>+ pgvector 0.8")]
-    OpenAI["OpenAI API<br/>embeddings + chat"]
+    OpenAI["OpenAI API<br/>embeddings · chat · transcription"]
 
     User -->|HTTPS| Web
     Web -->|"JSON + Bearer JWT"| Api
+    Web -->|"multipart audio"| Api
     Api -->|"NDJSON stream"| Web
     Api -->|"SQL + raw vector SQL"| Db
     Api -->|"HTTPS"| OpenAI
 ```
+
+**Speech synthesis is deliberately absent from that diagram.** Reading an answer aloud never leaves
+the browser, so it is not a dependency, not a route, and not a cost. Voice *input* is all three —
+see §4.2.
 
 **Trust boundary** sits at the `api` edge. Everything to the left of it is untrusted: the browser,
 the JWT payload's *claims about identity* (verified, not trusted-as-sent), and every request body.
@@ -71,10 +76,18 @@ disagree with a path is a bug waiting to be written.
 | OpenAI embeddings (`text-embedding-3-small`) | Ingestion + query vectors | **Both paths dead.** No embedding → no write, no search. | Only with a full corpus re-embed. Vectors from different models are not comparable. |
 | OpenAI chat (`CHAT_MODEL`, default `gpt-4o-mini`) | Answer generation | Read path dead; retrieval still works | Yes — env var. A model swap is a deploy decision. |
 | Neon Postgres | All persistence + vector search | Total outage | In principle; pgvector is the coupling point. |
+| OpenAI transcription (`gpt-4o-mini-transcribe`) | Voice input only | **Voice input dead; everything else unaffected.** The keyboard is the fallback and it is always present | Yes, but nothing depends on the choice — no stored artefact is derived from it |
+| Browser `speechSynthesis` | Reading answers aloud | Feature silently unavailable; detected and the control is not rendered | Not substitutable, and not worth substituting — see §10 |
 
 That asymmetry — **embedding model hardcoded, chat model configurable** — is the design's single
 most load-bearing config decision. Changing `CHAT_MODEL` costs a deploy. Changing the embedding
 model invalidates every vector in the database, so it must never be a flag anyone can flip.
+
+The transcription model is a third case and lands with the embedder, for a different reason: it is a
+constant because there is one deployment and no second transcriber to switch to, so an environment
+variable would be a configuration surface with no consumer and one more thing that can be missing in
+production. Note the **blast radius is the smallest of the three**: transcription touches no stored
+data, so an outage costs a feature rather than a corpus.
 
 ---
 
@@ -223,6 +236,50 @@ Three concrete consequences, all currently unhandled:
 
 All three are fixed by the same change, and the primitives for it already exist — see §8.
 
+### 4.2 Voice is an adapter around both paths, not a third one ✅
+
+Speech is the only capability here that touches neither path, and keeping it that way is the design.
+
+| | Voice in | Voice out |
+|---|---|---|
+| **Where** | `POST /transcriptions` | entirely in the browser |
+| **Shape** | short, synchronous, paid | streaming, free |
+| **Persists** | nothing | nothing |
+| **Cost unit** | **minutes of audio** | none |
+| **Failure** | a feature is unavailable; typing still works | the control is not rendered |
+
+A recording goes up, text comes back, and the text lands in the composer. The request that
+eventually reaches `/queries` or `/conversations` is **byte-identical to one a keyboard produced** —
+there is no `source: "voice"` field and there should not be one, because nothing downstream has any
+business behaving differently.
+
+**Why that matters more than it looks.** Transcription sits upstream of retrieval, exactly where the
+rewrite step sits (§4.0), and it has the same property: fold it in and hit-rate@k starts measuring
+"transcription + retrieval" while still being read as "retrieval". The argument that kept `/queries`
+untouched when chat arrived applies here before anyone has asked for it.
+
+**The transcript is returned to the user, not forwarded.** Chaining the two requests server-side
+would save a round trip and delete the only moment at which a mishearing is visible. "Parental leaf"
+is a well-formed question that retrieves nothing, and the grounded prompt then correctly refuses —
+so someone watches a working system deny what their document plainly says. Same failure shape as
+§4.0's pronoun problem: every component behaved as designed, and the symptom is nowhere near the
+cause. An editable text box converts a silent retrieval failure into an obvious typo.
+
+**Cost is bounded in a different unit from everything else in this system.** Every other paid route
+costs roughly a fixed amount per call, so counting calls bounds spend; transcription is billed by
+duration, so one permitted request can cost whatever the caller makes it. The controls are therefore
+layered in a specific order — the browser stops recording at 60s, the upload is byte-capped before
+anything is read, and only *then* do request limits mean anything (§7.1).
+
+### 4.3 The write path and the voice path are both multipart, and share nothing ✅
+
+Two routes now accept `multipart/form-data` with different size caps, different accepted formats and
+different downstream costs. They deliberately do not share a multer instance, a limit, or an error
+message. One shared consequence had to be handled explicitly: the error middleware sees only a
+`MulterError`, so a hardcoded size in a 413 would be correct for one route and a lie for the other.
+The limit is resolved from the error's *field name*, which is part of each route's contract rather
+than an incidental detail.
+
 ---
 
 ## 5. Data architecture
@@ -359,6 +416,10 @@ These are not estimates. Each is a constant with a rationale.
 | Request body (JSON) | 1 MB | `express.json()` | Sits *above* the content limit so oversized input fails with a field message, not a bare 413. **Does not apply to uploads** — see the row below |
 | Upload file size | 4 MB | `multer` `limits.fileSize` | The *only* bound on a multipart body. `express.json()` is content-type-gated: it sees `multipart/form-data`, calls `next()` without reading a byte, and its 1 MB limit never engages |
 | Uploaded PDF pages | 200 | `lib/pdf.ts` | Page count, not byte count, drives extraction cost — a 2 MB file can hold thousands of pages, so the size cap alone bounds nothing |
+| Audio upload size | 1 MB | `multer` `limits.fileSize` on `/transcriptions` | A **proxy for duration**, and an imperfect one: it is minutes that are billed, but nothing decodes the file before the paid call, so bytes are what can be checked for free. Roughly five minutes of the Opus every browser records — and only seconds of uncompressed WAV, which no browser produces here |
+| Audio floor | 2 KB | `/transcriptions` | Below a container header plus a few frames. Bounds the *empty* case, which matters because these models hallucinate fluent text on silence — see the loudness gate below, which bounds the quiet-room case |
+| Recording duration | 60 s | browser (`use-recorder.ts`) | The only bound expressed in the unit that is actually billed. Enforced on an interval rather than one timer, so a throttled background tab cannot miss it |
+| Recording loudness | peak amplitude ≥ 0.02 | browser (`use-recorder.ts`) | Only the decoded samples can distinguish a quiet room from speech, and the browser is the only side that has them. Peak, not average — real speech is mostly gaps, and an averaged measure of a short question sits close to silence |
 | Document title | 200 chars | `createDocumentSchema` | Optional on the upload route, where it defaults to the sanitised filename |
 | Document content | 200,000 chars | `createDocumentSchema` + upload route | Deliberately below the 1 MB body cap. Enforced a second time in the upload route because extracted text never passes through a body schema. **Rejected, never truncated** — a silently half-ingested document answers "not in your documents" for everything past the cut |
 | Question length | 1,000 chars | `askSchema`, conversation schemas | Far above a real question, far below the embedder's 8,191-token input cap |
@@ -530,6 +591,14 @@ is also written into the code it governs, next to the thing it explains.
 | Every rewrite failure falls back to the raw question | Fail the request | Condensing is a quality improvement; without it the behaviour is exactly what the app did before chat existed. Degrading to "search for what the user typed" is always safe. |
 | One shared concurrency counter across both answer routes | One `limitConcurrent(2)` per mount | The counter is closed over per call, so three instances of "max 2" is a max of 6. The resource being protected is shared, so the counter must be. |
 | `seq` on `Message`, not `createdAt` ordering | Order by timestamp | A question and its answer are frequently written in the same millisecond, and a timestamp gives them no defined order — rendering the answer above the question. The unique index then also serialises two tabs appending to one thread. |
+| Voice as an adapter; `/queries` and `/conversations` untouched | One endpoint taking audio and returning audio | Fewer moving parts, and it makes retrieval quality measure transcription and retrieval together while still reading as retrieval (§4.2). Same argument as chat, applied pre-emptively. |
+| Transcript returned to the user, not forwarded to retrieval | Chain recording straight to asking | Saves a round trip and deletes the only point at which a mishearing is visible. A misheard word is a well-formed question that retrieves nothing and is then correctly refused — a correct system producing a broken product. |
+| Paid model for input, browser synthesis for output | Paid TTS for both; browser speech recognition for both | A wrong transcript changes *which passages are retrieved*; a synthetic voice reading a correct answer is still correct. Spend where an error changes the result. The output half consequently adds no route, no limiter and no cost to a public link. Browser `SpeechRecognition` was rejected for input: Firefox does not ship it, Chrome's implementation ships audio to Google, and the model is not ours to choose. |
+| Audio identified by magic bytes, and the **server** names the file | Trust the client's `Content-Type` and filename | Same evidence-vs-claim rule as PDFs, plus a second job unique to audio: OpenAI selects its demuxer from the filename extension, and browsers disagree about what they record (Chrome WebM, Safari MP4). A Safari recording mislabelled `.webm` would fail inside the paid call for something knowable for free. |
+| Recordings never persisted | A `Recording` table for replay or eval | Storing voice recordings of strangers who clicked a link is a data liability with no feature behind it. The eval comparison that would justify it (transcribed vs. typed hit-rate) needs a fixture set, not production audio. |
+| Separate rate limiters for transcription | Reuse the answer limiters | Wrong in both directions at once: a spent question budget would silently disable the microphone, and a caller who never submits a question could transcribe all day against a counter nothing else decrements. |
+| Concurrency guard **not** applied to `/transcriptions` | Apply it uniformly to every paid route | It exists to bound simultaneous *streams* holding a resource open for seconds. A short request/response would only compete for slots with the answers it is trying to ask for. |
+| Realtime speech-to-speech rejected, not deferred | OpenAI Realtime over WebRTC | Functions hold no long-lived sockets, so retrieval would be called back into from inside the model's session — the grounded prompt, the fixed refusal and `temperature: 0` stop being what produces the answer. One session is also a single request that bills per minute for as long as a tab is open, which no request count bounds. And citations do not survive being spoken. |
 
 ---
 
@@ -543,6 +612,7 @@ is also written into the code it governs, next to the thing it explains.
 | M8 — async write path | pg-boss · worker service · retry · `202 Accepted` · reprocess job | ⬜ |
 | M9 — deployment | **Vercel × 2** (web + API as a function), custom subdomains, Redis-backed limits | ✅ **2026-07-27** |
 | M10 — conversations | `Conversation`/`Message` · history-aware rewrite · `NO_SEARCH` re-use path · `/chat` thread UI · per-message citation snapshots | ✅ **2026-08-06**, unit-tested ⬜ |
+| M11 — voice | `POST /transcriptions` · magic-byte container sniffing · audio-specific limiters · browser recorder with duration and loudness gates · spoken projection of the answer · sentence-buffered `speechSynthesis` · both surfaces | ✅ **2026-08-07**. Route validation and sniffing tested ✅ · spoken projection untested ⬜ (no runner in `web`) · unevaluated ⬜ |
 | Hardening | ~~Rate limiting~~ ✅ (Redis-backed) · ~~automated tests~~ ✅ (unit + HTTP tier) · refresh tokens · helmet · httpOnly cookies | 🟡 partial |
 
 **M9 landed before M7, and not on the planned infrastructure.** Cloud Run was dropped rather than
@@ -560,18 +630,26 @@ paragraph that spans two pages, and `chunkSize` acquires a second maximum that a
 *range* on `Chunk` and is therefore a schema change, not a tweak.
 
 **The effect is no longer hypothetical.** The eval corpus renders each source document at two page
-densities, which holds the text constant and varies only how much of it lands on a page. At roughly
-2,150 chars/page the split behaves normally — median chunk ~950 characters, about 5% of chunks under
-300. At roughly 330 chars/page it collapses: **the chars-per-page and chars-per-chunk distributions
-come out identical**, meaning every page produced exactly one chunk and `chunkSize: 1000` was never
-consulted. Median chunk size falls to ~330 and more than a third land under 300 characters.
+densities, which holds the text constant and varies only how much of it lands on a page. At the
+dense rendering the split behaves normally — the median chunk sits just under the configured ceiling
+and almost nothing falls below 300 characters. At the sparse rendering it collapses: **the
+chars-per-page and chars-per-chunk distributions come out identical**, meaning every page produced
+exactly one chunk and `chunkSize: 1000` was never consulted. The median chunk then lands well under
+half the configured size and a substantial minority fall below 300 characters.
 
-That is the mechanism, reproduced on demand rather than argued for.
+That is the mechanism, reproduced on demand rather than argued for — and it has now survived three
+documentation passes that rewrote large parts of the source text, which is worth more than the
+original measurement. It is a property of the rendering, not of that week's prose.
 
 > Exact counts are deliberately absent. **This document is one of the corpus sources**, so any figure
-> printed here alters the measurement it reports — editing this paragraph moved the sparse rendering
-> from 121 pages to 122. `pnpm eval:inspect` prints the current numbers; the *shape* above is what's
+> printed here alters the measurement it reports — editing this paragraph moves the sparse rendering
+> by a page or two. `pnpm eval:inspect` prints the current numbers; the *shape* above is what's
 > stable.
+>
+> **Earlier revisions of this paragraph broke that rule while stating it**, quoting a median and a
+> percentage that were stale by the following commit. The structural claims — pages equal chunks,
+> the distributions match at every quantile, the configured size is never consulted — have held
+> through every rebuild. The quantitative ones never survived one.
 
 What is still *not* measured is whether it costs anything that matters: vague vectors are a
 plausible story about retrieval, not evidence about it. Running the identical golden set against
@@ -613,3 +691,24 @@ harness must now separate two things that were one thing when it was specified. 
 first would have delayed a feature that makes the app demonstrable. Neither is free; the cost of the
 choice made is that **no claim about chat quality is currently backed by a number**, and the README
 says so.
+
+**M11 repeated the ordering choice and made the containment explicit rather than accidental.** Voice
+adds a second component upstream of retrieval, and unlike the rewriter it is upstream of *everything*
+— a mishearing produces a well-formed question with nothing anywhere to mark it as a bad input.
+
+The difference from M10 is that the containment was designed in from the start. Because a transcript
+enters the composer rather than the pipeline, the request reaching `/queries` is indistinguishable
+from a typed one, and **the existing single-turn measurements stay valid without a special case**.
+That is containment, not measurement: it stops voice contaminating the numbers, and it measures
+nothing about voice. The comparison that would settle it is hit-rate@k on transcribed questions
+against the same measure on their typed originals, over a fixture set of recordings — which is also
+the only thing that would justify persisting audio, and the reason nothing is persisted today.
+
+M11 also **widened an existing gap rather than opening a new one**. The spoken projection of an
+answer — stripping citation markers and formatting, then buffering a token stream into whole
+sentences — is pure, deterministic, and exactly the sort of logic the unit tier exists for. It is
+untested, because `web` still has no test runner, which is the same gap that already leaves the
+citation parser uncovered. It was checked by driving a simulated token stream through it, and that
+check found a real defect: the sentence segmenter breaks after abbreviations like "e.g.", producing a
+pause mid-sentence. Fixed, and worth recording that a fix proven by a throwaway script is a weaker
+claim than one proven by a suite that runs on every commit.

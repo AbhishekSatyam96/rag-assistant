@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, listDocuments, streamAsk, type Source } from "@/lib/api";
 import { useRequireAuth } from "@/lib/use-require-auth";
+import { useSpeech } from "@/lib/use-speech";
 import { AnswerView } from "@/components/AnswerView";
 import { SourceList } from "@/components/SourceList";
 import { PageHeader } from "@/components/AppShell";
@@ -28,6 +29,12 @@ export default function AskPage() {
   // `logout` moved to the shell's user menu, along with the nav links this
   // page's header used to carry.
   const { user, token, status } = useRequireAuth();
+
+  // Voice ships on BOTH surfaces, not just /chat. Not for completeness — /ask is
+  // the single-turn path the eval harness scores, and a feature that exists on
+  // only one of them would make "the same question through both surfaces"
+  // stop being a comparison of retrieval.
+  const speech = useSpeech();
 
   const [question, setQuestion] = useState("");
   // The question the CURRENT result belongs to. Separate from `question`,
@@ -110,7 +117,10 @@ export default function AskPage() {
     abortRef.current?.abort();
     abortRef.current = null;
     setStreaming(false);
-  }, []);
+    // Stop means stop. Sentences already queued would otherwise keep playing
+    // after the user has visibly halted the answer.
+    speech.cancel();
+  }, [speech]);
 
   // Takes the question as an ARGUMENT rather than reading the `question` state.
   // That's what lets an example chip submit in one click: setting state and
@@ -139,8 +149,17 @@ export default function AskPage() {
       setFocusedSource(null);
       setStreaming(true);
 
+      // A new question is a new turn: stop the previous answer's audio and put
+      // the sentence counter back to zero.
+      speech.reset();
+
       const controller = new AbortController();
       abortRef.current = controller;
+
+      // Accumulated in a LOCAL as well as in state. `answer` in this closure is
+      // always a render behind, and the speech buffer needs the text as it
+      // stands right now to decide which sentences are complete.
+      let spoken = "";
 
       try {
         // The whole streaming protocol, consumed as an ordinary loop. `switch`
@@ -164,6 +183,10 @@ export default function AskPage() {
               // from this render's closure and drop characters — the classic
               // version of this bug, and one that only shows up under speed.
               setAnswer((prev) => prev + event.value);
+              spoken += event.value;
+              // Cheap on a token that cannot have completed a sentence, and it
+              // holds the trailing fragment back until it is safe to speak.
+              speech.push(spoken, false);
               break;
 
             case "done":
@@ -171,6 +194,9 @@ export default function AskPage() {
               // repairs any drift between it and our token-by-token
               // accumulation, and costs nothing since they normally match.
               setAnswer(event.answer);
+              // `final` flushes the held-back last sentence, which otherwise
+              // would never be spoken at all.
+              speech.push(event.answer, true);
               break;
 
             case "error":
@@ -194,8 +220,9 @@ export default function AskPage() {
     },
     // `question` is no longer a dependency — the text arrives as an argument,
     // so this callback stays referentially stable across every keystroke
-    // instead of being rebuilt on each one.
-    [streaming, token],
+    // instead of being rebuilt on each one. `speech` is memoised by useSpeech
+    // for the same reason, so adding it costs nothing here.
+    [speech, streaming, token],
   );
 
   // Clicking a citation chip scrolls its source card into view and highlights
@@ -250,6 +277,8 @@ export default function AskPage() {
         onSubmit={ask}
         onStop={stop}
         streaming={streaming}
+        token={token}
+        speech={speech}
         autoFocus={status === "authenticated"}
         className="mb-8"
       />

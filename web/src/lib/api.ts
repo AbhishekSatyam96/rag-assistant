@@ -240,7 +240,12 @@ export function uploadPdf(
   return uploadRequest("/documents/upload", form, token);
 }
 
-async function uploadRequest<T>(path: string, form: FormData, token: string): Promise<T> {
+async function uploadRequest<T>(
+  path: string,
+  form: FormData,
+  token: string,
+  signal?: AbortSignal,
+): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${BASE_URL}${path}`, {
@@ -248,14 +253,61 @@ async function uploadRequest<T>(path: string, form: FormData, token: string): Pr
       // Authorization only. See the Content-Type note above.
       headers: { Authorization: `Bearer ${token}` },
       body: form,
+      signal,
     });
-  } catch {
+  } catch (err) {
+    // Rethrown untouched so a caller can tell "I cancelled this" from "the
+    // server is unreachable" — same rule as the two streaming functions below.
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new ApiError(0, "Can't reach the server. Is the API running on port 4000?");
   }
 
   const data = await res.json().catch(() => null);
   if (!res.ok) throw apiError(res.status, data);
   return data as T;
+}
+
+// --- transcription (voice input) ---------------------------------------------
+
+// Mirrored from MAX_AUDIO_BYTES in the api's lib/audio.ts. Checked client-side
+// only so an over-long recording fails instantly rather than after uploading a
+// megabyte; the server's copy is the one that enforces anything. Two codebases
+// cannot share a constant across an HTTP boundary, so this will drift if the
+// server value changes without this one.
+export const MAX_AUDIO_BYTES = 1024 * 1024;
+
+// Audio in, text out. Nothing is stored on either side — the result lands in the
+// composer as ordinary editable text, and only becomes a question if the user
+// submits it.
+//
+// NOTE WHAT IS NOT SENT: a filename. The server identifies the container from
+// its magic bytes and names the file itself, because OpenAI picks its demuxer
+// from the extension and the browsers disagree about what they record (Chrome
+// produces WebM, Safari produces MP4). Letting the client name it would make a
+// Safari recording mislabelled `.webm` fail inside the paid call, for something
+// knowable for free from the bytes. The third FormData argument is required by
+// the API to make this a file part rather than a text field, so it is a constant
+// the server ignores.
+export async function transcribeAudio(
+  token: string,
+  audio: Blob,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (audio.size > MAX_AUDIO_BYTES) {
+    throw new ApiError(413, "That recording is too long. Keep it under a minute.");
+  }
+
+  const form = new FormData();
+  // Field name must match `upload.single("audio")` on the server.
+  form.append("audio", audio, "recording");
+
+  const { text } = await uploadRequest<{ text: string }>(
+    "/transcriptions",
+    form,
+    token,
+    signal,
+  );
+  return text;
 }
 
 // One page of documents. `nextCursor` is null on the last page, and that is the

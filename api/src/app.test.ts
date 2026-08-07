@@ -33,6 +33,7 @@ const PROTECTED = [
   { method: "post", path: "/documents" },
   { method: "post", path: "/documents/upload" },
   { method: "post", path: "/queries" },
+  { method: "post", path: "/transcriptions" },
 ] as const;
 
 describe("authentication guard", () => {
@@ -133,6 +134,101 @@ describe("body parsing", () => {
 
     assert.equal(res.status, 413);
     assert.equal(typeof res.body.error, "string");
+  });
+});
+
+// POST /transcriptions — every rejection that happens BEFORE the paid call.
+//
+// That boundary is the whole reason these belong in the free tier: the route is
+// deliberately built so that a missing file, a recording too short to hold
+// speech, and bytes that are not audio at all are all decided from the request
+// itself. Nothing here opens a socket to OpenAI, and if one of these ever starts
+// to, this suite will hang and say so.
+describe("POST /transcriptions validation", () => {
+  let token: string;
+
+  before(async () => {
+    token = await signToken({ sub: "user-123", email: "user@example.com" });
+  });
+
+  it("400s a request with no file attached", async () => {
+    // multer leaves req.file undefined for a missing or misnamed field rather
+    // than erroring, so without the explicit check this is a TypeError and a 500.
+    const res = await request(app)
+      .post("/transcriptions")
+      .set("Authorization", `Bearer ${token}`);
+
+    assert.equal(res.status, 400);
+    assert.equal(typeof res.body.error, "string");
+  });
+
+  it("400s a file on the wrong field name", async () => {
+    const res = await request(app)
+      .post("/transcriptions")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", Buffer.alloc(4096), "recording.webm");
+
+    assert.equal(res.status, 400);
+  });
+
+  it("400s a recording too short to contain speech", async () => {
+    // A valid WebM header and nothing else — the shape a click on the mic
+    // button produces. Rejected on size before the sniff, so the message talks
+    // about length rather than sending the user to fix the format.
+    const stub = Buffer.alloc(512);
+    Buffer.from([0x1a, 0x45, 0xdf, 0xa3]).copy(stub);
+
+    const res = await request(app)
+      .post("/transcriptions")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("audio", stub, "recording.webm");
+
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /short/i);
+  });
+
+  it("400s bytes that are not audio, whatever the content-type claims", async () => {
+    // The forged-content-type case. Large enough to clear the size floor, so
+    // the only thing that can reject it is the magic-byte check.
+    const res = await request(app)
+      .post("/transcriptions")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("audio", Buffer.alloc(8192, 0x41), {
+        filename: "recording.webm",
+        contentType: "audio/webm",
+      });
+
+    assert.equal(res.status, 400);
+  });
+
+  it("413s an oversized recording, naming the AUDIO limit and not the PDF one", async () => {
+    // The regression this pins: two multipart routes with different caps share
+    // one error handler, so a hardcoded label would be wrong on one of them.
+    // middleware/error.ts resolves it from MulterError.field.
+    const oversized = Buffer.alloc(2 * 1024 * 1024, 0x41);
+    Buffer.from([0x1a, 0x45, 0xdf, 0xa3]).copy(oversized);
+
+    const res = await request(app)
+      .post("/transcriptions")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("audio", oversized, "recording.webm");
+
+    assert.equal(res.status, 413);
+    assert.match(res.body.error, /1 MB/);
+  });
+
+  it("still names the 4 MB limit on the PDF route", async () => {
+    // The other half of the same regression. Both directions have to be pinned,
+    // because a single-sided test passes just as happily with the labels swapped.
+    const oversized = Buffer.alloc(5 * 1024 * 1024, 0x41);
+
+    const res = await request(app)
+      .post("/documents/upload")
+      .set("Authorization", `Bearer ${token}`)
+      .attach("file", oversized, "big.pdf");
+
+    assert.equal(res.status, 413);
+    assert.match(res.body.error, /4 MB/);
   });
 });
 

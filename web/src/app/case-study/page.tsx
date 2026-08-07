@@ -30,7 +30,7 @@ import {
 export const metadata: Metadata = {
   title: "Case study",
   description:
-    "How the RAG Knowledge Assistant is built: architecture, the decisions worth defending, why a follow-up question breaks retrieval, and what was deliberately left out.",
+    "How the RAG Knowledge Assistant is built: architecture, the decisions worth defending, why a follow-up question breaks retrieval, why voice sits outside the pipeline, and what was deliberately left out.",
 };
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,10 @@ const FACTS = [
   { label: "Role", value: "Sole designer, engineer and operator" },
   { label: "Surface", value: "Express 5 API · Next.js 16 web app" },
   { label: "Data", value: "Neon Postgres + pgvector, HNSW index" },
-  { label: "Model", value: "text-embedding-3-small · gpt-4o-mini" },
+  {
+    label: "Model",
+    value: "text-embedding-3-small · gpt-4o-mini · gpt-4o-mini-transcribe",
+  },
 ] as const;
 
 const PIPELINE = [
@@ -130,6 +133,31 @@ const DECISIONS = [
     body: "The normalised design links each answer to the passages it used. It is wrong here, because passages are deleted with their document and recreated with new identifiers whenever a document is reprocessed — and reprocessing is a first-class operation in this system, not an edge case. A reference would make old citations either vanish or dangle. The resolution comes from asking what a citation actually asserts: not that an answer points at a row, but that it was built from this passage at the time it was given. Historical claims get stored as copies. The cost is duplicated text and the loss of an easy query for what gets cited most, and both were accepted.",
   },
   {
+    tag: "Voice",
+    title: "Speech wraps the pipeline; it is not a stage inside it",
+    body: "A question can be spoken and an answer can be read aloud, and neither capability appears anywhere in the retrieval or generation code. Recording produces text that fills the same box typing fills, and the request that follows is byte-identical to the one a keyboard would have sent. Reading aloud consumes an answer that has already been produced. The alternative — a single endpoint that accepts audio and returns audio — is fewer moving parts and it would have made retrieval quality measure transcription and retrieval together while still being read as retrieval alone. It is the same argument that kept conversations out of the single-turn path, applied before anyone asked for it rather than after the number moved.",
+  },
+  {
+    tag: "Voice",
+    title: "The transcript is handed back to the person, not sent straight to the search",
+    body: "Chaining recording to asking saves a round trip and removes the only moment at which a mishearing is visible. A transcriber that turns leave into leaf produces a question that retrieves nothing, and the grounding prompt then correctly refuses — so someone watches a working system insist their document does not say a thing it plainly says. That is the same shape as the follow-up failure above: every component behaved as designed and the visible symptom is nowhere near the cause. Putting the text in an editable box costs one deliberate keystroke and converts a silent retrieval failure into an obvious typo.",
+  },
+  {
+    tag: "Voice",
+    title: "The input is a paid model and the output is the browser's own",
+    body: "The two halves of a voice feature look symmetrical and are not. A wrong transcript changes which passages are retrieved, so input quality changes what the system does; a synthetic voice reading a correct answer is still a correct answer, so output quality is decoration. Money goes where an error changes the result. The side effect is that the output half adds no endpoint, no rate limiter and no cost to a link posted publicly, which is the kind of consequence that makes a decision easy to defend twice.",
+  },
+  {
+    tag: "Voice",
+    title: "What is read aloud is not what is on screen",
+    body: "The answer carries bracketed citation markers and light formatting, both of which several synthesis engines read out literally. Speech therefore gets its own projection of the same string, in the same way a transcript and a model prompt are two projections of the same stored messages. Nothing is lost, because the cited text is on screen while it is being spoken. The harder half is that the answer arrives as a token stream and a token respects sentence boundaries no more than a network packet respects line boundaries: sentences are buffered and the trailing one is always held back, since a buffer ending in version one looks finished until the next token turns it into version one point five.",
+  },
+  {
+    tag: "Operations",
+    title: "A request limit does not bound minutes of audio",
+    body: "Every other paid route here costs a roughly fixed amount per call, so counting calls bounds spend. Transcription is billed by duration, which means a single permitted request can cost whatever the caller chooses to make it. Counting is therefore only half the control: the recording stops itself after a minute in the browser, the upload is capped at a size chosen from what a minute of compressed speech weighs, and only then do per-minute, per-day and global request limits mean anything. The size cap is an imperfect proxy for duration and is documented as one, because the codec decides how many seconds fit in a megabyte.",
+  },
+  {
     tag: "Evaluation",
     title: "Adding conversations did not touch the path being measured",
     body: "The rewriting step sits in front of retrieval, so folding it into the existing single-turn endpoint would have made retrieval quality measure rewriting and retrieval together while still being read as retrieval alone. When the number moved there would be no way to attribute it. Chat is a sibling instead: the single-turn path is unchanged down to the system prompt string, and the conversation rules are appended to that prompt rather than edited into it. Both surfaces call the same retrieval and generation code, so the thing being measured is still the thing people use.",
@@ -165,6 +193,18 @@ const NOT_BUILT = [
   {
     title: "Rewriting quality is unmeasured",
     body: "Rewriting a follow-up before searching is a real improvement and an unproven one. It also introduces a failure mode that did not exist before: a rewrite that loses the user's intent produces confident retrieval of the wrong passage, which reads exactly like a retrieval regression and is not one. The comparison that would settle it is retrieval accuracy on the rewritten query against the same measure on the raw follow-up. It shipped on a product argument, because multi-turn is unusable without it, and no claim about its quality is made anywhere until that number exists.",
+  },
+  {
+    title: "The speech layer has no committed test",
+    body: "Turning an answer into something worth listening to is pure, deterministic logic and the natural thing to cover. It is not covered, because the web package still has no test runner at all — the same gap that already leaves the citation parser untested. The logic was checked by driving a simulated token stream through it, which found a real defect: the sentence segmenter breaks after abbreviations like e.g., producing a pause in the middle of a sentence. That was fixed, and a fix confirmed by a script that no longer exists is a weaker claim than a fix confirmed by a suite that runs on every commit.",
+  },
+  {
+    title: "Voice input is unevaluated",
+    body: "Transcription introduces a failure mode that did not exist before and sits upstream of everything: a mishearing produces a well-formed question that retrieves the wrong passages, or none. Keeping it outside the pipeline means the existing retrieval measurements stay attributable, but it does not measure the new step. The comparison that would settle it is retrieval accuracy on transcribed questions against the same measure on the typed originals. Until that exists, the honest claim is that voice is an input method, not that it is an accurate one.",
+  },
+  {
+    title: "Realtime speech-to-speech",
+    body: "A continuous spoken conversation is the version of this feature people picture, and it was rejected rather than postponed. The deployment platform does not hold long-lived socket connections, so retrieval would have to be called back into from inside the model's own session, which means the grounding prompt, the fixed refusal and the temperature setting stop being what produces the answer. Audio is also billed per minute against an open signup, which no request-counting limit bounds. And citations do not survive being spoken: the numbered markers are the product, and reading them aloud is either noise or nothing.",
   },
   {
     title: "OCR for scanned PDFs",

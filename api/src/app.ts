@@ -5,6 +5,7 @@ import { authRouter } from "./modules/auth/auth.routes.js";
 import { documentRouter } from "./modules/documents/document.routes.js";
 import { queryRouter } from "./modules/queries/query.routes.js";
 import { conversationRouter } from "./modules/conversations/conversation.routes.js";
+import { transcriptionRouter } from "./modules/transcriptions/transcription.routes.js";
 import { requireAuth } from "./middleware/auth.js";
 import { errorHandler } from "./middleware/error.js";
 import { answerConcurrency } from "./middleware/concurrency.js";
@@ -140,6 +141,21 @@ export function createApp() {
   //   GET    /conversations/:id       thread + messages
   //   DELETE /conversations/:id
   app.use("/conversations", requireAuth, conversationRouter);
+
+  // POST /transcriptions — voice input. Audio in, text out, nothing stored.
+  //
+  // It sits OUTSIDE the answer pipeline on purpose. The transcript comes back to
+  // the browser, lands in the composer as editable text, and only becomes a
+  // question when the user submits it — so /queries and /conversations receive
+  // exactly the request they always did and cannot tell a spoken question from a
+  // typed one. That keeps the M7 eval harness scoring retrieval rather than
+  // "transcription plus retrieval", the same reasoning that made chat a sibling
+  // of /queries instead of an extension to it.
+  //
+  // Its rate limiters live inside the router rather than here, because they are
+  // this route's own budget in a different unit (minutes of audio, not answers)
+  // — see the note on their definitions in middleware/rate-limit.ts.
+  app.use("/transcriptions", requireAuth, transcriptionRouter);
 
   // Error middleware must be registered LAST, after all routes.
   app.use(errorHandler);

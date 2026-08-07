@@ -21,6 +21,7 @@ flowchart TD
         DR["document.routes"]
         QR["query.routes"]
         CR["conversation.routes"]
+        TR["transcription.routes<br/>no service layer"]
     end
     subgraph services["services — orchestration"]
         AS["auth.service"]
@@ -35,6 +36,8 @@ flowchart TD
         RE["retrieve"]
         AN["answer"]
         CO["condense"]
+        AU["audio"]
+        TC["transcribe"]
         JW["jwt"]
         PW["password"]
         NS["ndjson-stream<br/>⚠ knows HTTP"]
@@ -52,6 +55,9 @@ flowchart TD
     QR --> NS
     CR --> NS
     DR --> PD
+    TR --> AU
+    TR --> TC
+    TC --> OA
     AS --> JW
     AS --> PW
     DS --> CH
@@ -79,7 +85,15 @@ flowchart TD
 | `services/` | orchestration, transactions | `express`, `res`, headers | `query.service` yields **events**, not HTTP |
 | `lib/` | one job each | HTTP, or each other's internals | No `express` import anywhere in `lib/` |
 
-**Two arrows break the pattern, and both should be called out rather than smoothed over.**
+**`transcriptions/` has no service layer, and the absence is the point.** Every other module has one
+because there is orchestration to hold: a transaction, a state machine, a generator yielding events.
+This route validates a buffer, calls one library function and returns a string. A service here would
+be a file that forwards its arguments — the layering exists to keep orchestration out of routes, not
+to make every module the same shape, and adding an empty layer to satisfy symmetry is how a codebase
+acquires files nobody can explain. If voice ever needs a decision made about it, that is when the
+layer earns its place.
+
+**Three arrows break the pattern, and all three should be called out rather than smoothed over.**
 
 `document.routes → lib/pdf`. The upload route converts an HTTP artifact (a multipart buffer) into
 domain input (text + pages), which is defensible as transport-adaptation — the same category of
@@ -87,6 +101,14 @@ work as zod-parsing a body. What is *less* defensible is that the route also joi
 pages into `content`, and that join is part of the **dedupe contract**: `content` is what gets
 hashed, so the separator must never change, yet it lives one layer away from `hashContent`. Logged
 in §10.
+
+`transcription.routes → lib/audio` is the same category as the PDF arrow above and less troubling,
+because nothing it produces is part of a persistence contract. `sniffAudio` turns bytes into a
+container identity, which is transport-adaptation in the same sense zod-parsing a body is. The one
+thing worth noticing is *why* the route needs the answer: it names the file it hands to OpenAI, which
+selects a demuxer from the extension. Browsers disagree about what they record — Chrome emits WebM,
+Safari MP4 — so a client-supplied filename would make a Safari recording fail inside the paid call
+for something knowable for free from the first twelve bytes.
 
 `lib/ndjson-stream` imports `express` types, which the table above forbids. It is the deliberate
 exception and it is named as such in the filename: it holds the response-writing loop, the deferred
@@ -702,6 +724,7 @@ disconnect would mean paying for retrieval and generation nobody will read.
 | `GET` | `/conversations` | ✅ | `200 {conversations, nextCursor}` | `400` bad `limit` · `401` |
 | `GET` | `/conversations/:id` | ✅ | `200 {conversation}` incl. `messages[]` | `401` · **`404`** |
 | `DELETE` | `/conversations/:id` | ✅ | **`204`** | `401` · **`404`** |
+| `POST` | `/transcriptions` | ✅ | `200 {text}` | `400` no file, wrong field, under the byte floor, bytes are not audio · `401` · `413` >1 MB · **`422`** decoded fine, nothing said · `429` · `500` |
 
 ### Status-code decisions
 
@@ -720,6 +743,10 @@ disconnect would mean paying for retrieval and generation nobody will read.
 | **`409`** when two tabs append to one thread | The `@@unique([conversationId, seq])` violation surfaces as `P2002` and becomes a `409`, not a `500`: nothing is broken, the client's view of the thread is simply stale, and a refetch then a retry works. Without the constraint both writes succeed and two conversations silently interleave into one unreadable transcript. |
 | **`204`**, not `200`, for delete | The resource is gone; returning the deleted object invites a client to render something the server just destroyed. `deleteMany` is used rather than `delete` so "not mine" and "does not exist" both come back as a count of zero → the same `404`. |
 | Rate limiters on the two chat **POSTs**, not at the mount point | Unlike `/queries`, this router mixes expensive writes with cheap reads. Budgeting `GET /conversations` against a daily *answer* limit would lock a user out of transcripts they have already paid for. |
+| **`422`, not `400`**, for a silent recording | Exactly parallel to the scanned-PDF case: the request was well-formed and the audio decoded cleanly, there was simply nothing said in it. Note what this does **not** catch — an empty transcript is the honest failure, while a *hallucinated* one arrives as ordinary non-empty text with no marker on it. That is bounded by a byte floor here and a loudness gate in the browser, not by a keyword blocklist, which would be a guess that fails open on every phrase not in it. |
+| `413` resolves its limit from **`MulterError.field`** | Two multipart routes now carry different caps (4 MB for a PDF, 1 MB for audio) behind one error handler, so a hardcoded number would be correct on one route and a lie on the other — the exact drift `lib/upload.ts` was created to prevent, arriving from a new direction. The field name is part of each route's contract, not an incidental detail. An unrecognised field omits the number entirely rather than guessing: "too large" with no figure is unhelpful, while a wrong figure is trusted and retried against. |
+| Size checked **before** the container sniff | A truncated recording fails both. Reporting the format problem would send the user to fix something that is not wrong, so the cheaper and more specific check runs first. |
+| No zod schema on `/transcriptions` | There is no body to validate — one file part, and every rule about it (present, large enough, small enough, actually audio) is a property of bytes rather than of a parsed object. A schema here would validate the empty set. |
 
 ### The `/queries` NDJSON stream
 
@@ -826,6 +853,8 @@ Real ones, from the code — not a list assembled to look longer.
 | Async generator | `answerQuestion`, `streamAnswer` | Backpressure, early `break`, and error propagation all work as normal control flow |
 | Guard clause at the boundary | `requireAuth` at the **mount point** | A route added later cannot ship unauthenticated |
 | Schema-as-type | zod `.infer` | One source of truth for runtime validation and compile-time types |
+| Buffer-and-flush over a stream | `lib/ndjson.ts` (lines) · `lib/speech.ts` (sentences) | A network chunk respects no line boundary and a token respects no sentence boundary. Both accumulate, emit only complete units, and hold the remainder — and both fail identically if skipped: perfectly on short input, badly on long input |
+| Two projections of one source | `toHistory` vs. the transcript · `toSpeech` vs. the rendered answer | The same rows or the same string serve two audiences with opposite rules. Deriving both rather than storing either keeps them from drifting |
 
 > **Frontend analogy for `QueryEvent`:** it is a Redux action union, or a typed `postMessage`
 > protocol. Same discriminant, same exhaustiveness guarantee.
@@ -856,3 +885,6 @@ Real ones, from the code — not a list assembled to look longer.
 | Concurrency cap is per-instance | Low — the limiters moved to Redis, the `Map` deliberately did not, so "2 streams per user" reads as "2 per instance" behind an autoscaler | Nothing: it counts sockets this process owns, and the per-user cost bound now belongs to the Redis limiters |
 | Conversation list has no "load more" in the UI | Low — the api is cursor-paginated and the client fetches only the first page on `/chat` | Wire the cursor through, as `/documents` already does |
 | Answers rendered as preformatted text | Low — model emits markdown | Render + sanitise (text derives from user documents) |
+| No test runner in `web` at all 🟡 | **High** — it now hides two pure, deterministic modules: `lib/citations.ts` (the `[n]` parser, whose module-level `/g` regex is exactly the kind of thing a test exists for) and `lib/speech.ts` (the spoken projection and the sentence buffer). The speech module was checked by driving a simulated token stream through it, which found a real defect — the segmenter breaking after "e.g." — and that check exists nowhere in the repo | A `node:test` + `tsx` setup in `web`, mirroring `api`. It also forces the open question of whether the citation parser should be one implementation shared with the eval harness or two that can drift |
+| Voice input is unevaluated | Medium — transcription sits upstream of *everything*, and a mishearing is a well-formed question that retrieves the wrong passages with nothing to mark it as bad input | hit-rate@k on transcribed questions vs. their typed originals, over a fixture set of recordings. That fixture set is also the only thing that would justify persisting audio, which is why none is persisted today |
+| Audio size cap is a proxy for duration | Low — accepted and documented. Minutes are billed; bytes are what can be checked without decoding, and the codec decides how many seconds fit in one megabyte | Nothing planned. The browser's 60s cap is the bound expressed in the billed unit; this one bounds memory and the request body |

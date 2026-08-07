@@ -3,6 +3,7 @@ import { MulterError } from "multer";
 import { ZodError } from "zod";
 import { HttpError } from "../lib/http-error.js";
 import { MAX_UPLOAD_LABEL } from "../lib/upload.js";
+import { MAX_AUDIO_LABEL } from "../lib/audio.js";
 
 // body-parser (i.e. express.json()) can reject a request before it ever reaches
 // a route: body over the configured limit, malformed JSON, an encoding we can't
@@ -51,23 +52,53 @@ function bodyParserMessage(err: BodyParserError): string {
 //
 // The status split matters too: an oversized file is 413 (the semantically
 // correct "payload too large"), while a malformed multipart body is 400.
+// There is now more than one upload route, and they have DIFFERENT caps — 4 MB
+// for a PDF (sized by Vercel's request-body limit), 1 MB for a recording (sized
+// by what a minute of audio costs to transcribe). One error handler serving both
+// is exactly the drift lib/upload.ts was written to prevent, reintroduced from a
+// new direction: whichever label was hardcoded here would be wrong for the other
+// route.
+//
+// `MulterError.field` carries the fieldname the limit was hit on, which is the
+// only discriminator available at this layer and happens to be the right one —
+// the field name is part of each route's contract (`file` vs `audio`), not an
+// incidental detail. An unrecognised field falls back to no number at all rather
+// than to a plausible wrong one: "too large" with no figure is unhelpful, and
+// "the limit is 4 MB" on a route where it is 1 MB is actively misleading,
+// because the user will trust it and retry at 3 MB.
+const SIZE_LABEL_BY_FIELD: Record<string, string> = {
+  file: MAX_UPLOAD_LABEL,
+  audio: MAX_AUDIO_LABEL,
+};
+
 function multerMessage(err: MulterError): { status: number; message: string } {
   switch (err.code) {
-    case "LIMIT_FILE_SIZE":
+    case "LIMIT_FILE_SIZE": {
       // Multer's own message is "File too large" with no number in it, which
-      // leaves the user guessing at the limit. The number is imported rather
+      // leaves the user guessing at the limit. The number is looked up rather
       // than written out: this message used to hardcode "10 MB" and kept saying
       // so after the cap dropped to 4 MB, telling users a limit that was not the
-      // limit. See lib/upload.ts.
+      // limit.
+      const label = SIZE_LABEL_BY_FIELD[err.field ?? ""];
       return {
         status: 413,
-        message: `That file is too large. The limit is ${MAX_UPLOAD_LABEL}.`,
+        message: label
+          ? `That file is too large. The limit is ${label}.`
+          : "That file is too large.",
       };
+    }
     case "LIMIT_FILE_COUNT":
     case "LIMIT_UNEXPECTED_FILE":
       // Either more files than configured, or a file on a field name we don't
       // accept. Both mean the client built the form wrong.
-      return { status: 400, message: "Upload exactly one file, in the `file` field." };
+      //
+      // This no longer names the expected field. It used to say "in the `file`
+      // field", which was right while /documents/upload was the only multipart
+      // route and became a lie the moment /transcriptions started expecting
+      // `audio`. The field that IS on the error is the wrong one the client
+      // sent, not the right one it should have — so there is nothing accurate to
+      // name here, and each route's own 400 for a missing file says it instead.
+      return { status: 400, message: "Upload exactly one file, on the expected field." };
     case "LIMIT_FIELD_COUNT":
     case "LIMIT_FIELD_KEY":
     case "LIMIT_FIELD_VALUE":

@@ -12,6 +12,7 @@ import {
   type Source,
 } from "@/lib/api";
 import { useRequireAuth } from "@/lib/use-require-auth";
+import { useSpeech } from "@/lib/use-speech";
 import { PageHeader } from "@/components/AppShell";
 import { ChatComposer } from "@/components/ChatComposer";
 import { ConversationList } from "@/components/ConversationList";
@@ -46,6 +47,12 @@ const EXAMPLES = [
 
 export function ChatView({ conversationId: initialId }: { conversationId?: string }) {
   const { user, token, status } = useRequireAuth();
+
+  // Reading answers aloud. Owned here rather than in the composer because only
+  // this component sees the token stream, and speaking has to start BEFORE the
+  // stream finishes — the same instinct as emitting sources before the first
+  // token: do not make the user wait out the slow part for the fast feedback.
+  const speech = useSpeech();
 
   // Null until a thread exists. On /chat it is filled in by the `conversation`
   // event; on /chat/[id] it is known from the route.
@@ -201,7 +208,11 @@ export function ChatView({ conversationId: initialId }: { conversationId?: strin
   const stop = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-  }, []);
+    // Stop means stop. Leaving the browser to finish reading three queued
+    // sentences after the user has visibly halted the answer is the loudest
+    // possible way to look broken.
+    speech.cancel();
+  }, [speech]);
 
   const ask = useCallback(
     async (raw: string) => {
@@ -209,6 +220,10 @@ export function ChatView({ conversationId: initialId }: { conversationId?: strin
 
       const trimmed = raw.trim();
       if (!trimmed) return;
+
+      // Before anything else: kill the previous answer's audio and put the
+      // sentence counter back to zero. A new question is a new turn.
+      speech.reset();
 
       setQuestion("");
       setAsked(trimmed);
@@ -268,6 +283,12 @@ export function ChatView({ conversationId: initialId }: { conversationId?: strin
               // from this render's closure and drop characters — a bug that only
               // shows up under speed.
               setAnswer((prev) => prev + event.value);
+              // Fed the LOCAL accumulator, not the state, for exactly the same
+              // reason: this closure's `answer` is a render behind. `push` is
+              // cheap on a token that cannot have completed a sentence, and
+              // holds back the trailing fragment until it is safe to speak —
+              // see lib/speech.ts.
+              speech.push(finalAnswer, false);
               break;
 
             case "done":
@@ -276,6 +297,10 @@ export function ChatView({ conversationId: initialId }: { conversationId?: strin
               // costs nothing since they normally match.
               finalAnswer = event.answer;
               setAnswer(event.answer);
+              // `final` flushes the held-back last sentence, which otherwise
+              // never gets spoken — the most-reported bug shape for anything
+              // built on a buffer-and-flush.
+              speech.push(event.answer, true);
               break;
 
             case "error":
@@ -346,7 +371,10 @@ export function ChatView({ conversationId: initialId }: { conversationId?: strin
         abortRef.current = null;
       }
     },
-    [conversationId, streaming, token],
+    // `speech` is a memoised object from useSpeech, so adding it here does not
+    // rebuild this callback per keystroke — which was the property the original
+    // dependency list was chosen to preserve.
+    [conversationId, speech, streaming, token],
   );
 
   const handleCitationClick = useCallback((domId: string, n: number) => {
@@ -523,6 +551,8 @@ export function ChatView({ conversationId: initialId }: { conversationId?: strin
           onSubmit={ask}
           onStop={stop}
           streaming={streaming}
+          token={token}
+          speech={speech}
           autoFocus
           placeholder={
             messages.length > 0 ? "Ask a follow-up…" : "What do your documents say about…?"

@@ -226,6 +226,36 @@ export function IconExternal(props: IconProps) {
   );
 }
 
+export function IconMic(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="9" y="2.5" width="6" height="11.5" rx="3" />
+      <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3.5" />
+    </Icon>
+  );
+}
+
+// "Reading aloud is on" — a speaker with waves. Paired with IconSpeakerOff
+// below, which is the same cone so the two read as one control in two states
+// rather than as two different buttons.
+export function IconSpeaker(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M11 5 6.5 9H3v6h3.5L11 19V5Z" />
+      <path d="M15 9.5a3.5 3.5 0 0 1 0 5m2.8-7.8a7 7 0 0 1 0 10.6" />
+    </Icon>
+  );
+}
+
+export function IconSpeakerOff(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M11 5 6.5 9H3v6h3.5L11 19V5Z" />
+      <path d="m15.5 10 4 4m0-4-4 4" />
+    </Icon>
+  );
+}
+
 export function IconMail(props: IconProps) {
   return (
     <Icon {...props}>
